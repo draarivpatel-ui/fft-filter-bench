@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive DSP workbench: FFT spectrum analysis, FIR and biquad filter design, Bode plots and pole-zero inspection.">
+  <title>FFT Filter Bench | DSP Workbench</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#workbench">Skip to workbench</a>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">~</span>
+      <div>
+        <h1>FFT Filter Bench</h1>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="engineBadge" class="badge">engine loading</span>
+      <button id="themeToggle" class="btn btn-ghost" type="button" aria-pressed="false">Light theme</button>
+      <button id="helpToggle" class="btn btn-ghost" type="button" aria-expanded="false" aria-controls="helpPanel">Guide</button>
+    </div>
+  </header>
+
+  <section id="helpPanel" class="help-panel" hidden>
+    <h2>How to use this workbench</h2>
+    <p>All signals here are <strong>synthetic benchmark stimuli</strong> generated locally. Nothing is measured from hardware.</p>
+    <ol>
+      <li>Pick a preset or adjust the signal, filter and analysis controls.</li>
+      <li>Every plot redraws immediately from the real DSP engine in <code>src/dsp.cjs</code>.</li>
+      <li>Hover or use arrow keys on a plot to probe exact numerical values.</li>
+      <li>Export the experiment as JSON, CSV, C header or a WAV file of the filtered signal.</li>
+    </ol>
+    <p class="small">Keyboard: arrow keys move the frequency probe, Home/End jump to DC/Nyquist, Enter pins it, Escape releases it. Press <kbd>Space</kbd> on a focused button to activate it.</p>
+  </section>
+
+  <main id="workbench" class="layout">
+    <aside class="panel controls-panel" aria-label="Experiment controls">
+      <div class="panel-head">
+        <h2>Experiment</h2>
+        <span class="panel-tag">synthetic / benchmark</span>
+      </div>
+
+      <div class="control-block">
+        <label for="presetSelect">Benchmark preset</label>
+        <select id="presetSelect">
+          <option value="voiceBand">Synthetic preset: voice-band cleanup</option>
+          <option value="antiAlias">Synthetic preset: anti-alias study</option>
+          <option value="notchTwoTone">Synthetic preset: two-tone isolation</option>
+          <option value="widebandNoise">Synthetic preset: wideband noise</option>
+          <option value="custom">Custom</option>
+        </select>
+        <p id="presetNote" class="hint"></p>
+      </div>
+
+      <div class="control-block">
+        <h3>Synthetic stimulus</h3>
+        <div class="control-row">
+          <label for="sampleRate">Sample rate (Hz)</label>
+          <select id="sampleRate">
+            <option value="16000">16000</option>
+            <option value="44100">44100</option>
+            <option value="48000" selected>48000</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="fftSize">FFT size</label>
+          <select id="fftSize">
+            <option value="512">512</option>
+            <option value="1024">1024</option>
+            <option value="2048" selected>2048</option>
+            <option value="4096">4096</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="tone1Hz">Tone A (Hz)</label>
+          <input id="tone1Hz" type="range" min="100" max="8000" step="50" value="1000">
+          <output id="tone1Out" for="tone1Hz">1000</output>
+        </div>
+        <div class="control-row">
+          <label for="tone2Hz">Tone B (Hz)</label>
+          <input id="tone2Hz" type="range" min="1000" max="22000" step="100" value="7000">
+          <output id="tone2Out" for="tone2Hz">7000</output>
+        </div>
+        <div class="control-row">
+          <label for="noiseLevel">Noise level</label>
+          <input id="noiseLevel" type="range" min="0" max="0.6" step="0.01" value="0.10">
+          <output id="noiseOut" for="noiseLevel">0.10</output>
+        </div>
+        <div class="control-row">
+          <label for="seedInput">Noise seed</label>
+          <input id="seedInput" type="number" min="0" max="4294967295" step="1" value="12345">
+        </div>
+      </div>
+
+      <div class="control-block">
+        <h3>Filter design</h3>
+        <div class="control-row">
+          <label for="filterFamily">Family</label>
+          <select id="filterFamily">
+            <option value="butterworth">Butterworth lowpass</option>
+            <option value="chebyshev">Chebyshev I lowpass</option>
+            <option value="highpass">Butterworth highpass</option>
+            <option value="bandpass">Constant-peak bandpass</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="cutoff">Cutoff fc (cycles/sample)</label>
+          <input id="cutoff" type="range" min="0.01" max="0.49" step="0.005" value="0.15">
+          <output id="cutoffOut" for="cutoff">0.150</output>
+        </div>
+        <div class="control-row" id="rippleRow">
+          <label for="rippleDb">Passband ripple (dB)</label>
+          <input id="rippleDb" type="range" min="0.1" max="6" step="0.1" value="1">
+          <output id="rippleOut" for="rippleDb">1.0</output>
+        </div>
+        <div class="control-row" id="qRow" hidden>
+          <label for="qFactor">Quality factor Q</label>
+          <input id="qFactor" type="range" min="0.5" max="12" step="0.1" value="4">
+          <output id="qOut" for="qFactor">4.0</output>
+        </div>
+        <div class="control-row">
+          <label for="windowSelect">FIR window</label>
+          <select id="windowSelect">
+            <option value="hamming" selected>Hamming</option>
+            <option value="hann">Hann</option>
+            <option value="blackman">Blackman</option>
+            <option value="rectangular">Rectangular</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="firTaps">FIR taps</label>
+          <input id="firTaps" type="range" min="9" max="129" step="8" value="33">
+          <output id="firTapsOut" for="firTaps">33</output>
+        </div>
+      </div>
+
+      <div class="control-block">
+        <h3>Display</h3>
+        <div class="control-row">
+          <label for="windowForSpectrum">Spectrum window</label>
+          <select id="windowForSpectrum">
+            <option value="rectangular" selected>Rectangular</option>
+            <option value="hann">Hann</option>
+            <option value="hamming">Hamming</option>
+            <option value="blackman">Blackman</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="plotMode">IIR trace</label>
+          <select id="plotMode">
+            <option value="both" selected>Input and output</option>
+            <option value="output">Output only</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="button-grid">
+        <button id="resetBtn" class="btn btn-ghost" type="button">Reset</button>
+        <button id="randomBtn" class="btn btn-ghost" type="button">New seed</button>
+      </div>
+      <p id="errorStatus" class="error-status" role="alert" hidden></p>
+    </aside>
+
+    <section class="stage" aria-label="Analysis plots and diagnostics">
+      <div class="panel status-panel">
+        <div class="stat-grid" aria-label="Live diagnostics">
+          <div class="stat"><span class="stat-label">Stability</span><strong id="statStability">--</strong></div>
+          <div class="stat"><span class="stat-label">Max pole radius</span><strong id="statPole">--</strong></div>
+          <div class="stat"><span class="stat-label">Gain at cutoff</span><strong id="statGain">--</strong></div>
+          <div class="stat"><span class="stat-label">Group delay @ DC</span><strong id="statDelay">--</strong></div>
+          <div class="stat"><span class="stat-label">Input RMS</span><strong id="statInputRms">--</strong></div>
+          <div class="stat"><span class="stat-label">Output RMS</span><strong id="statOutputRms">--</strong></div>
+          <div class="stat"><span class="stat-label">Parseval error</span><strong id="statParseval">--</strong></div>
+          <div class="stat"><span class="stat-label">Finite samples</span><strong id="statFinite">--</strong></div>
+        </div>
+        <p id="statusLine" class="status-line" role="status">Initializing engine</p>
+      </div>
+
+      <div class="plot-grid">
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>Signal: source and filtered</h2><span class="plot-note">time domain</span></div>
+          <canvas id="signalCanvas" width="880" height="220" tabindex="0" role="img" aria-label="Input and filtered output waveforms"></canvas>
+          <p id="signalReadout" class="readout">Probe: move pointer over the plot</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>Magnitude spectrum</h2><span class="plot-note">FFT, dB</span></div>
+          <canvas id="spectrumCanvas" width="880" height="220" tabindex="0" role="img" aria-label="Input and output magnitude spectra"></canvas>
+          <p id="spectrumReadout" class="readout" aria-live="polite">Probe: DC</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>Bode response</h2><span class="plot-note">magnitude / phase / group delay</span></div>
+          <div class="seg-row" role="group" aria-label="Bode view">
+            <button class="seg" data-bode="mag" aria-pressed="true" type="button">Magnitude</button>
+            <button class="seg" data-bode="phase" aria-pressed="false" type="button">Phase</button>
+            <button class="seg" data-bode="grpDelay" aria-pressed="false" type="button">Group delay</button>
+          </div>
+          <canvas id="bodeCanvas" width="880" height="240" tabindex="0" role="img" aria-label="Bode plot of the designed biquad"></canvas>
+          <p id="bodeReadout" class="readout" aria-live="polite">Probe: DC</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>Pole-zero plane</h2><span class="plot-note">z-plane</span></div>
+          <svg id="poleZeroSvg" viewBox="0 0 400 400" role="img" aria-label="Pole-zero plot with unit circle">
+            <title>Pole-zero plane</title>
+            <desc>Zeros shown as circles, poles as crosses, with the unit circle.</desc>
+          </svg>
+          <p id="poleZeroNote" class="readout">All poles must lie inside the unit circle for stability.</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>FIR impulse response</h2><span class="plot-note">windowed sinc</span></div>
+          <canvas id="firCanvas" width="880" height="180" tabindex="0" role="img" aria-label="FIR coefficient stem plot"></canvas>
+          <p id="firReadout" class="readout">Probe: tap 0</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>Coefficients and response</h2><span class="plot-note">computed values</span></div>
+          <div class="table-scroll">
+            <table id="coeffTable">
+              <caption>Biquad coefficients (a0 normalized to 1) and FIR summary</caption>
+              <thead><tr><th scope="col">Quantity</th><th scope="col">Value</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="bodeTable" class="sr-only" aria-label="Bode data table"></div>
+        </article>
+      </div>
+
+      <div class="panel export-panel">
+        <div class="export-head"><h2>Export experiment</h2><span id="exportNote" class="hint">Files are generated locally from the current state.</span></div>
+        <div class="export-buttons">
+          <button id="jsonBtn" class="btn btn-primary" type="button">JSON snapshot</button>
+          <button id="coeffCsvBtn" class="btn" type="button">Coefficients CSV</button>
+          <button id="bodeCsvBtn" class="btn" type="button">Bode CSV</button>
+          <button id="spectrumCsvBtn" class="btn" type="button">Spectrum CSV</button>
+          <button id="cHeaderBtn" class="btn" type="button">C header</button>
+          <button id="wavInputBtn" class="btn" type="button">WAV: input</button>
+          <button id="wavOutputBtn" class="btn" type="button">WAV: filtered</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Zero dependencies. Open this file directly from disk. All algorithms run locally in <code>src/dsp.cjs</code>, generated from <code>src/dsp.mjs</code>.</p>
+    <p id="footerStatus">Ready</p>
+  </footer>
+
+  <script src="src/dsp.cjs"></script>
+  <script src="app.js"></script>
+</body>
+</html>

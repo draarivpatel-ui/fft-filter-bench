@@ -1,0 +1,18 @@
+{
+  "name": "fft-filter-bench",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Interactive DSP workbench: radix-2 FFT, windowed-sinc FIR, biquad IIR design, Bode and pole-zero analysis with local JSON/CSV/WAV/C-header exports",
+  "type": "module",
+  "main": "src/dsp.mjs",
+  "scripts": {
+    "build": "node scripts/build-bundle.mjs",
+    "test": "node --test --test-reporter=spec test/dsp.test.mjs test/invariants.test.mjs test/extended.test.mjs ui.test.cjs",
+    "bench": "node scripts/bench.mjs"
+  },
+  "keywords": ["fft", "dsp", "filter", "biquad", "fir", "bode", "pole-zero", "signal-processing"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
