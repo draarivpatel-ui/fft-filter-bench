@@ -176,19 +176,20 @@
           <div class="stat"><span class="stat-label">Finite samples</span><strong id="statFinite">--</strong></div>
         </div>
         <p id="statusLine" class="status-line" role="status">Initializing engine</p>
+        <span id="probeAnnounce" class="visually-hidden" aria-live="polite" aria-atomic="true"></span>
       </div>
 
       <div class="plot-grid">
         <article class="panel plot-panel">
           <div class="plot-head"><h2>Signal: source and filtered</h2><span class="plot-note">time domain</span></div>
-          <canvas id="signalCanvas" width="880" height="220" tabindex="0" role="img" aria-label="Input and filtered output waveforms"></canvas>
-          <p id="signalReadout" class="readout">Probe: move pointer over the plot</p>
+          <canvas id="signalCanvas" width="880" height="220" tabindex="0" role="application" aria-label="Input and filtered output waveforms. Use arrow keys to move the probe, Enter to pin it."></canvas>
+          <p id="signalReadout" class="readout" aria-live="off">Probe: move pointer over the plot</p>
         </article>
 
         <article class="panel plot-panel">
           <div class="plot-head"><h2>Magnitude spectrum</h2><span class="plot-note">FFT, dB</span></div>
-          <canvas id="spectrumCanvas" width="880" height="220" tabindex="0" role="img" aria-label="Input and output magnitude spectra"></canvas>
-          <p id="spectrumReadout" class="readout" aria-live="polite">Probe: DC</p>
+          <canvas id="spectrumCanvas" width="880" height="220" tabindex="0" role="application" aria-label="Input and output magnitude spectra. Use arrow keys to move the probe, Enter to pin it."></canvas>
+          <p id="spectrumReadout" class="readout" aria-live="off">Probe: DC</p>
         </article>
 
         <article class="panel plot-panel">
@@ -198,8 +199,8 @@
             <button class="seg" data-bode="phase" aria-pressed="false" type="button">Phase</button>
             <button class="seg" data-bode="grpDelay" aria-pressed="false" type="button">Group delay</button>
           </div>
-          <canvas id="bodeCanvas" width="880" height="240" tabindex="0" role="img" aria-label="Bode plot of the designed biquad"></canvas>
-          <p id="bodeReadout" class="readout" aria-live="polite">Probe: DC</p>
+          <canvas id="bodeCanvas" width="880" height="240" tabindex="0" role="application" aria-label="Bode plot of the designed biquad. Use arrow keys to move the probe, Enter to pin it."></canvas>
+          <p id="bodeReadout" class="readout" aria-live="off">Probe: DC</p>
         </article>
 
         <article class="panel plot-panel">
@@ -213,13 +214,13 @@
 
         <article class="panel plot-panel">
           <div class="plot-head"><h2>FIR impulse response</h2><span class="plot-note">windowed sinc</span></div>
-          <canvas id="firCanvas" width="880" height="180" tabindex="0" role="img" aria-label="FIR coefficient stem plot"></canvas>
-          <p id="firReadout" class="readout">Probe: tap 0</p>
+          <canvas id="firCanvas" width="880" height="180" tabindex="0" role="application" aria-label="FIR coefficient stem plot. Use arrow keys to move the probe, Enter to pin it."></canvas>
+          <p id="firReadout" class="readout" aria-live="off">Probe: tap 0</p>
         </article>
 
         <article class="panel plot-panel">
           <div class="plot-head"><h2>Coefficients and response</h2><span class="plot-note">computed values</span></div>
-          <div class="table-scroll">
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Biquad coefficients and computed values">
             <table id="coeffTable">
               <caption>Biquad coefficients (a0 normalized to 1) and FIR summary</caption>
               <thead><tr><th scope="col">Quantity</th><th scope="col">Value</th></tr></thead>

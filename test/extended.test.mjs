@@ -449,3 +449,67 @@ test('fir lowpass of odd and even-len designs stays normalized', () => {
     close(Array.from(coefficients).reduce((a, v) => a + v, 0), 1, 1e-9);
   }
 });
+
+// ---------- adversarial regressions (Pass 2) ----------
+test('designLowpass at the cutoff floor stays finite and stable (regression)', () => {
+  const b = D.designLowpass(1e-6);
+  for (const v of Object.values(b)) assert.ok(Number.isFinite(v));
+  const st = D.biquadStability(b);
+  assert.equal(st.stable, true);
+  assert.ok(st.maxPoleRadius < 1);
+});
+
+test('cutoff floor rejects the degenerate underflow zone (regression)', () => {
+  assert.throws(() => D.designLowpass(1e-9), RangeError);
+  assert.throws(() => D.designHighpass(1e-9), RangeError);
+  assert.throws(() => D.chebyshevLowpass(1e-9, 1), RangeError);
+  assert.throws(() => D.validateCutoff(5e-7), RangeError);
+});
+
+test('near-zero Q and near-zero ripple are rejected, not NaN (regression)', () => {
+  assert.throws(() => D.designLowpass(0.2, Number.MIN_VALUE), RangeError);
+  assert.throws(() => D.designHighpass(0.2, 1e-9), RangeError);
+  assert.throws(() => D.designBandpass(0.2, 0), RangeError);
+  assert.throws(() => D.chebyshevLowpass(0.2, 1e-100), RangeError);
+});
+
+test('Jury flag agrees with pole radius at the stable boundary (regression)', () => {
+  for (const fc of [1e-6, 1e-4, 0.4999]) {
+    const st = D.biquadStability(D.designLowpass(fc));
+    assert.equal(st.stable, true, `fc=${fc}`);
+    assert.equal(st.jury, true, `fc=${fc} jury disagreement`);
+  }
+  const st = D.biquadStability({ b0: 1, b1: 0, b2: 0, a1: -2, a2: 1 });
+  assert.equal(st.stable, false);
+});
+
+test('exportCHeader sanitizes a leading digit and rejects NaN coeffs (regression)', () => {
+  const h = D.exportCHeader(D.designLowpass(0.1), '2filter');
+  assert.match(h, /#ifndef _2FILTER_H/);
+  assert.match(h, /_2filter_process/);
+  assert.throws(() => D.exportCHeader({ b0: NaN, b1: 0, b2: 0, a1: 0, a2: 0 }), RangeError);
+});
+
+test('exportWAV validates rate and samples (regression)', () => {
+  assert.throws(() => D.exportWAV([0.5], 1e10), RangeError);
+  assert.throws(() => D.exportWAV([0.5], -8000), RangeError);
+  assert.throws(() => D.exportWAV([0.5], 44100.5), RangeError);
+  assert.throws(() => D.exportWAV([NaN], 8000), RangeError);
+  assert.throws(() => D.exportWAV([Infinity], 8000), RangeError);
+});
+
+test('exportBodeCSV rejects non-finite bode values (regression)', () => {
+  const bode = { freq: [0, 0.5], mag: [-3, NaN], phase: [0, 0], grpDelay: [0, 0] };
+  assert.throws(() => D.exportBodeCSV(bode), RangeError);
+});
+
+test('parsevalEnergy rejects mismatched lengths (regression)', () => {
+  assert.throws(() => D.parsevalEnergy([1, 2, 3, 4], null, [1, 2], [0, 0]), RangeError);
+});
+
+test('fft stage loop uses multiplication, not int32 shifts', () => {
+  const { fileURLToPath } = require('node:url');
+  const src = require('node:fs').readFileSync(
+    fileURLToPath(new URL('../src/dsp.mjs', import.meta.url)), 'utf8');
+  assert.ok(!/len\s*<<=\s*1/.test(src), 'len <<= 1 overflows int32 for N >= 2^30');
+});

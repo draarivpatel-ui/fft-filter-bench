@@ -120,7 +120,12 @@
       tone1Hz: state.tone1Hz, tone2Hz: state.tone2Hz, noise: state.noise, seed: state.seed,
       firTaps: state.firTaps, firWindow: state.window, spectrumWindow: state.spectrumWindow
     };
-    const coeffs = D.designFilter({ family: config.family, fc: config.fc, rippleDb: config.rippleDb, Q: config.Q });
+    // Only bandpass exposes a Q control; other families must not inherit the
+    // hidden slider's value (a highpass built with bandpass Q is a resonator).
+    const coeffs = D.designFilter({
+      family: config.family, fc: config.fc, rippleDb: config.rippleDb,
+      Q: config.family === 'bandpass' ? config.Q : undefined
+    });
     for (const v of Object.values(coeffs)) if (!Number.isFinite(v)) throw new Error('Nonfinite filter coefficients');
     D.validateCutoff(config.fc);
 
@@ -141,18 +146,24 @@
     const pz = D.poleZeroPlotData(coeffs);
     const stability = D.biquadStability(coeffs);
 
-    // Windowed FFT spectra of input and IIR output.
+    // Windowed FFT spectra of input and IIR output. Amplitudes are normalized
+    // by the window's coherent gain so a bin-centered unit tone reads ~0 dB
+    // for every window, with DC/Nyquist on the single-sided scale.
     const win = D.windowFunction(config.spectrumWindow, input.length);
-    const specIn = D.fftReal(Float64Array.from(input, (v, i) => v * win[i]));
+    const xw = Float64Array.from(input, (v, i) => v * win[i]);
+    const specIn = D.fftReal(xw);
     const specOut = D.fftReal(Float64Array.from(iir, (v, i) => v * win[i]));
     const magIn = D.magnitude(specIn.real, specIn.imag);
     const magOut = D.magnitude(specOut.real, specOut.imag);
+    const coherentGain = Array.from(win).reduce((a, v) => a + v, 0) / input.length;
+    const N = input.length, halfN = Math.floor(N / 2);
+    const scale = k => (k === 0 || k === halfN ? N * coherentGain : N * coherentGain / 2);
     const spectrum = {
-      bins: Float64Array.from({ length: Math.floor(input.length / 2) + 1 }, (_, k) => k / input.length),
-      magInDb: Float64Array.from({ length: Math.floor(input.length / 2) + 1 }, (_, k) => D.linearToDb(magIn[k] / (input.length / 2))),
-      magOutDb: Float64Array.from({ length: Math.floor(input.length / 2) + 1 }, (_, k) => D.linearToDb(magOut[k] / (input.length / 2)))
+      bins: Float64Array.from({ length: halfN + 1 }, (_, k) => k / N),
+      magInDb: Float64Array.from({ length: halfN + 1 }, (_, k) => D.linearToDb(magIn[k] / scale(k))),
+      magOutDb: Float64Array.from({ length: halfN + 1 }, (_, k) => D.linearToDb(magOut[k] / scale(k)))
     };
-    const { timeEnergy, freqEnergy } = D.parsevalEnergy(input, null, specIn.real, specIn.imag);
+    const { timeEnergy, freqEnergy } = D.parsevalEnergy(xw, null, specIn.real, specIn.imag);
     const parsevalError = Math.abs(timeEnergy - freqEnergy) / Math.max(timeEnergy, 1e-12);
 
     const diagnostics = D.filterDiagnostics(input, iir, coeffs, config.tone1Hz, config.sampleRate);
@@ -358,8 +369,7 @@
     const x = m.l + (w - m.l - m.r) * idx / (n - 1);
     ctx.strokeStyle = cssVar('--accent', '#62a6ff'); ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, h - m.b); ctx.stroke(); ctx.setLineDash([]);
-    const units = key === 'mag' ? 'dB' : key === 'phase' ? 'rad' : 'samples';
-    $('bodeReadout').textContent = `freq ${fmt(b.freq[idx], 4)} x PI | ${fmt(b.mag[idx], 3)} dB | ${fmt(b.phase[idx], 3)} rad | group delay ${fmt(b.grpDelay[idx], 3)} ${units}`;
+    $('bodeReadout').textContent = `freq ${fmt(b.freq[idx], 4)} x PI | ${fmt(b.mag[idx], 3)} dB | ${fmt(b.phase[idx], 3)} rad | group delay ${fmt(b.grpDelay[idx], 3)} samples`;
   }
 
   function drawFir() {
@@ -471,20 +481,43 @@
   }
 
   /* --------------------------- Probe interaction -------------------------- */
+  // Plot-area margins used by each draw routine; the probe must map pointer x
+  // to data only inside that rectangle, not across the whole canvas.
+  const PLOT_MARGINS = {
+    signalCanvas: { l: 48, r: 12 },
+    spectrumCanvas: { l: 48, r: 12 },
+    bodeCanvas: { l: 54, r: 12 },
+    firCanvas: { l: 48, r: 12 }
+  };
+  let announceTimer = null;
+  function announceProbe(text) {
+    const el = $('probeAnnounce');
+    if (!el) return;
+    if (typeof clearTimeout === 'function' && typeof setTimeout === 'function') {
+      if (announceTimer) clearTimeout(announceTimer);
+      announceTimer = setTimeout(() => { el.textContent = text; }, 350);
+    } else {
+      el.textContent = text;
+    }
+  }
   function probeFromPointer(id, ev, key) {
     const canvas = $(id);
     const rect = canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : { left: 0, width: 880 };
     const x = Number(ev.clientX) - (rect.left || 0);
-    const t = D.clamp(x / Math.max(1, rect.width || 880), 0, 1);
+    const m = PLOT_MARGINS[id] || { l: 0, r: 0 };
+    const width = rect.width || 880;
+    const t = D.clamp((x - m.l) / Math.max(1, width - m.l - m.r), 0, 1);
     if (key === 'signal') state.probe.signal = t;
     else if (key === 'spectrum') state.probe.spectrum = Math.round(t * (state.data.spectrum.bins.length - 1));
     else if (key === 'bode') state.probe.bode = Math.round(t * (state.data.bode.freq.length - 1));
     else if (key === 'fir') state.probe.fir = Math.round(t * (state.data.firDesign.coefficients.length - 1));
     redraw();
+    const readoutIds = { signal: 'signalReadout', spectrum: 'spectrumReadout', bode: 'bodeReadout', fir: 'firReadout' };
     if (key === 'signal') {
       const i = Math.min(state.data.input.length - 1, Math.round(t * (state.data.input.length - 1)));
       $('signalReadout').textContent = `sample ${i} | input ${fmt(state.data.input[i], 5)} | iir ${fmt(state.data.iir[i], 5)} | fir ${fmt(state.data.firOut[i], 5)}`;
     }
+    announceProbe($(readoutIds[key]).textContent);
   }
 
   function bindProbes() {
@@ -530,6 +563,8 @@
             const i = Math.min(state.data.input.length - 1, Math.round(state.probe.signal * (state.data.input.length - 1)));
             $('signalReadout').textContent = `sample ${i} | input ${fmt(state.data.input[i], 5)} | iir ${fmt(state.data.iir[i], 5)} | fir ${fmt(state.data.firOut[i], 5)}`;
           }
+          const readoutIds = { signal: 'signalReadout', spectrum: 'spectrumReadout', bode: 'bodeReadout', fir: 'firReadout' };
+          announceProbe($(readoutIds[key]).textContent);
         }
       });
     }

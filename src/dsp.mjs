@@ -35,10 +35,15 @@ export function isFiniteNumber(value) {
 
 /** Validate a normalized cutoff. Throws on nonfinite or out-of-range input. */
 export function validateCutoff(fc) {
-  if (!isFiniteNumber(fc) || fc <= 0 || fc >= 0.5) {
-    throw new RangeError(`cutoff must satisfy 0 < fc < 0.5, got ${fc}`);
+  if (!isFiniteNumber(fc) || fc < 1e-6 || fc >= 0.5) {
+    throw new RangeError(`cutoff must satisfy 1e-6 <= fc < 0.5, got ${fc}`);
   }
   return fc;
+}
+
+function validateQ(Q) {
+  if (!isFiniteNumber(Q) || Q < 1e-6) throw new RangeError(`Q must be >= 1e-6, got ${Q}`);
+  return Q;
 }
 
 export function dbToLinear(db) { return Math.pow(10, db / 20); }
@@ -88,8 +93,8 @@ export function fft(real, imag, inverse = false) {
       const ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
     }
   }
-  for (let len = 2; len <= n; len <<= 1) {
-    const half = len >> 1;
+  for (let len = 2; len <= n; len *= 2) {
+    const half = len / 2;
     const angle = (inverse ? TAU : -TAU) / len;
     const wr = Math.cos(angle), wi = Math.sin(angle);
     for (let base = 0; base < n; base += len) {
@@ -140,8 +145,11 @@ export function phase(real, imag) {
 
 /** Parseval: sum|x[n]|^2 = (1/N) * sum|X[k]|^2. */
 export function parsevalEnergy(timeReal, timeImag, freqReal, freqImag) {
-  let timeEnergy = 0, freqEnergy = 0;
   const n = timeReal.length;
+  if (freqReal.length !== n || freqImag.length !== n) {
+    throw new RangeError('time and frequency arrays must share one length');
+  }
+  let timeEnergy = 0, freqEnergy = 0;
   for (let i = 0; i < n; i++) {
     timeEnergy += timeReal[i] * timeReal[i] + (timeImag?.[i] || 0) * (timeImag?.[i] || 0);
     freqEnergy += freqReal[i] * freqReal[i] + freqImag[i] * freqImag[i];
@@ -282,9 +290,10 @@ export function biquadFilter(input, coeffs) {
  */
 export function designLowpass(fc, Q = Math.SQRT1_2) {
   validateCutoff(fc);
-  if (!isFiniteNumber(Q) || Q <= 0) throw new RangeError('Q must be positive');
+  validateQ(Q);
   const w0 = TAU * fc, cw = Math.cos(w0), alpha = Math.sin(w0) / (2 * Q);
-  const b0 = (1 - cw) / 2, b1 = 1 - cw, b2 = (1 - cw) / 2;
+  const s = Math.sin(w0 / 2);
+  const b0 = s * s, b1 = 2 * s * s, b2 = s * s;
   const a0 = 1 + alpha, a1 = -2 * cw, a2 = 1 - alpha;
   return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
 }
@@ -292,9 +301,10 @@ export function designLowpass(fc, Q = Math.SQRT1_2) {
 /** RBJ-style highpass section. Unity gain at Nyquist, zero at DC. */
 export function designHighpass(fc, Q = Math.SQRT1_2) {
   validateCutoff(fc);
-  if (!isFiniteNumber(Q) || Q <= 0) throw new RangeError('Q must be positive');
+  validateQ(Q);
   const w0 = TAU * fc, cw = Math.cos(w0), alpha = Math.sin(w0) / (2 * Q);
-  const b0 = (1 + cw) / 2, b1 = -(1 + cw), b2 = (1 + cw) / 2;
+  const c = Math.cos(w0 / 2);
+  const b0 = c * c, b1 = -2 * c * c, b2 = c * c;
   const a0 = 1 + alpha, a1 = -2 * cw, a2 = 1 - alpha;
   return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
 }
@@ -302,7 +312,7 @@ export function designHighpass(fc, Q = Math.SQRT1_2) {
 /** Constant-0-dB-peak bandpass section, centered on fc. */
 export function designBandpass(fc, Q = 2) {
   validateCutoff(fc);
-  if (!isFiniteNumber(Q) || Q <= 0) throw new RangeError('Q must be positive');
+  validateQ(Q);
   const w0 = TAU * fc, cw = Math.cos(w0), alpha = Math.sin(w0) / (2 * Q);
   const a0 = 1 + alpha, a1 = -2 * cw, a2 = 1 - alpha;
   return { b0: alpha / a0, b1: 0, b2: -alpha / a0, a1: a1 / a0, a2: a2 / a0 };
@@ -330,8 +340,8 @@ export function butterworthLowpass(fc, fs = 1) {
 export function chebyshevLowpass(fc, rippleDb = 1, fs = 1) {
   void fs;
   validateCutoff(fc);
-  if (!isFiniteNumber(rippleDb) || rippleDb <= 0 || rippleDb > 20) {
-    throw new RangeError('rippleDb must be in (0, 20]');
+  if (!isFiniteNumber(rippleDb) || rippleDb < 1e-6 || rippleDb > 20) {
+    throw new RangeError('rippleDb must be in [1e-6, 20]');
   }
   const eps = Math.sqrt(Math.pow(10, rippleDb / 10) - 1);
   const v = Math.asinh(1 / eps) / 2;
@@ -393,7 +403,7 @@ export function biquadPoleZero(coeffs) {
 /** Jury stability criterion for a real second-order denominator. */
 export function biquadStability(coeffs) {
   const { a1, a2 } = coeffs;
-  const jury = 1 + a1 + a2 > 0 && 1 - a1 + a2 > 0 && 1 - a2 > 0;
+  const jury = 1 + a1 + a2 > -EPS && 1 - a1 + a2 > -EPS && 1 - a2 > -EPS;
   const { poles, zeros } = biquadPoleZero(coeffs);
   const maxPoleRadius = Math.max(...poles.map(p => Math.hypot(p.real, p.imag)));
   const minPhase = zeros.every(z => Math.hypot(z.real, z.imag) <= 1 + 1e-9);
@@ -490,7 +500,11 @@ export function csvField(value) {
 }
 
 export function exportCHeader(coeffs, name = 'biquad') {
-  const safe = String(name).replace(/[^A-Za-z0-9_]/g, '_');
+  for (const k of ['b0', 'b1', 'b2', 'a1', 'a2']) {
+    if (!isFiniteNumber(coeffs[k])) throw new RangeError(`coefficient ${k} is not finite`);
+  }
+  let safe = String(name).replace(/[^A-Za-z0-9_]/g, '_');
+  if (!/^[A-Za-z_]/.test(safe)) safe = '_' + safe;
   const upper = safe.toUpperCase();
   const guard = upper + '_H';
   const lines = [
@@ -521,6 +535,9 @@ export function exportCSV(coeffs, name = 'biquad') {
 export function exportBodeCSV(bode) {
   const rows = [['freq_normalized', 'magnitude_db', 'phase_rad', 'group_delay_samples']];
   for (let i = 0; i < bode.freq.length; i++) {
+    for (const key of ['freq', 'mag', 'phase', 'grpDelay']) {
+      if (!Number.isFinite(bode[key][i])) throw new RangeError(`bode.${key}[${i}] is not finite`);
+    }
     rows.push([bode.freq[i].toFixed(8), bode.mag[i].toFixed(8), bode.phase[i].toFixed(8), bode.grpDelay[i].toFixed(8)]);
   }
   return rows.map(r => r.join(',')).join('\n') + '\n';
@@ -560,7 +577,13 @@ export function exportExperimentJSON(experiment) {
 
 /** Minimal 16-bit mono PCM WAV (RIFF/WAVE), returned as a Uint8Array. */
 export function exportWAV(samples, sampleRate = 48000) {
+  if (!Number.isSafeInteger(sampleRate) || sampleRate < 1 || sampleRate > 0xFFFFFFFF) {
+    throw new RangeError(`sampleRate must be an integer in [1, 4294967295], got ${sampleRate}`);
+  }
   const n = samples.length;
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(samples[i])) throw new RangeError(`sample ${i} is not finite`);
+  }
   const buffer = new ArrayBuffer(44 + n * 2);
   const view = new DataView(buffer);
   const ascii = (offset, text) => { for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i)); };

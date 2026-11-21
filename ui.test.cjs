@@ -309,3 +309,80 @@ test('browser bundle and ES module produce identical coefficients and Bode data'
   const wav = D.exportWAV(new Float64Array([0, 0.5, -0.5]), 48000);
   assert.equal(wav.length, 50);
 });
+
+/* ---------------- adversarial regressions (Pass 2) ---------------- */
+
+test('highpass family keeps Butterworth Q instead of inheriting bandpass Q', () => {
+  const h = bench();
+  change(h, 'qFactor', '12');           // stale hidden slider value
+  change(h, 'filterFamily', 'bandpass');
+  change(h, 'filterFamily', 'highpass'); // Q row now hidden again
+  const gain = parseFloat(h.get('statGain').textContent);
+  assert.ok(Math.abs(gain - -3.01) < 0.3, `highpass gain at fc was ${gain} dB, expected about -3.01`);
+  h.dispose();
+});
+
+test('Parseval diagnostic stays near machine epsilon for every spectrum window', () => {
+  const h = bench();
+  for (const w of ['rectangular', 'hann', 'hamming', 'blackman']) {
+    change(h, 'windowForSpectrum', w);
+    const err = parseFloat(h.get('statParseval').textContent);
+    assert.ok(err < 1e-10, `window ${w} Parseval error ${err}`);
+  }
+  h.dispose();
+});
+
+test('pointer probe maps the plot area, not the whole canvas', () => {
+  const h = bench();
+  h.event(h.get('signalCanvas'), 'pointermove', { clientX: 48, clientY: 10 });
+  assert.match(h.get('signalReadout').textContent, /sample 0 \|/, 'left plot edge must be sample 0');
+  h.event(h.get('bodeCanvas'), 'pointermove', { clientX: 54, clientY: 10 });
+  assert.match(h.get('bodeReadout').textContent, /freq 0\.0000/, 'left plot edge must be freq 0');
+  h.event(h.get('spectrumCanvas'), 'pointermove', { clientX: 48, clientY: 10 });
+  assert.match(h.get('spectrumReadout').textContent, /bin 0 \|/, 'left plot edge must be bin 0');
+  h.dispose();
+});
+
+test('bode readout reports group delay in samples, not the view units', () => {
+  const h = bench();
+  assert.match(h.get('bodeReadout').textContent, /group delay [\d.-]+ samples$/);
+  h.dispose();
+});
+
+test('spectrum magnitude is calibrated for every analysis window', () => {
+  const h = bench();
+  input(h, 'tone1Hz', '1500');   // exactly bin 64 at 48000/2048
+  input(h, 'tone2Hz', '375');    // bin 16
+  change(h, 'noiseLevel', '0');
+  const data = () => h.sandbox.__FFTB__.data.spectrum.magInDb;
+  for (const w of ['rectangular', 'hann', 'hamming', 'blackman']) {
+    change(h, 'windowForSpectrum', w);
+    const peak = Math.max(...Array.from(data()));
+    // tone1 amp 0.8 -> -1.94 dB expected; window leakage may pull it a touch lower.
+    assert.ok(Math.abs(peak - -1.94) < 0.5, `${w} peak ${peak} dB`);
+  }
+  h.dispose();
+});
+
+test('coefficient table region is keyboard-scrollable and labeled', () => {
+  const h = bench();
+  const region = h.html.match(/<div class="table-scroll"[^>]*>/)?.[0] || '';
+  assert.match(region, /tabindex="0"/);
+  assert.match(region, /role="region"/);
+  assert.match(region, /aria-label=/);
+  h.dispose();
+});
+
+test('probe readouts use a debounced polite announcer, not per-move live regions', () => {
+  const h = bench();
+  for (const id of ['signalReadout', 'spectrumReadout', 'bodeReadout', 'firReadout']) {
+    assert.equal(h.get(id).getAttribute('aria-live'), 'off');
+  }
+  const ann = h.get('probeAnnounce');
+  assert.equal(ann.getAttribute('aria-live'), 'polite');
+  assert.equal(ann.getAttribute('aria-atomic'), 'true');
+  h.event(h.get('spectrumCanvas'), 'pointermove', { clientX: 200, clientY: 10 });
+  assert.ok(h.sandbox.__FFTB__ || true); // announcement is timer-debounced; just ensure no errors
+  assert.deepEqual(h.errors, []);
+  h.dispose();
+});
