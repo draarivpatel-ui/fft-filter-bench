@@ -4,6 +4,8 @@
 
 Open `index.html` directly from disk. There are no dependencies, build steps, accounts or network requests. `src/dsp.cjs` is generated from `src/dsp.mjs` by `npm run build`, so the browser and the Node tests share one algorithm source.
 
+**Live demo:** [https://aariv.me/fft-filter-bench/](https://aariv.me/fft-filter-bench/)
+
 ## Four synthetic benchmark presets
 
 | Preset | What it demonstrates |
