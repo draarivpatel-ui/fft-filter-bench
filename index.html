@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Interactive DSP workbench: FFT spectrum analysis, FIR and biquad filter design, Bode plots and pole-zero inspection.">
   <title>FFT Filter Bench | DSP Workbench</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='12'%20fill='%231d6fe0'/%3E%3Cpath%20d='M8%2032c4-14%208-20%2012-20s6%2012%208%2020%204%2020%208%2020%206-12%208-20%204-20%208-20%204%2010%206%2014'%20stroke='%23fff'%20stroke-width='5'%20fill='none'%20stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -156,6 +157,34 @@
         </div>
       </div>
 
+      <div class="control-block">
+        <h3>Target specification</h3>
+        <div class="control-row">
+          <label for="specEdge1Hz">Band edge 1 (Hz)</label>
+          <input id="specEdge1Hz" type="number" min="0" max="24000" step="50" value="2000">
+        </div>
+        <div class="control-row">
+          <label for="specEdge2Hz">Band edge 2 (Hz)</label>
+          <input id="specEdge2Hz" type="number" min="0" max="24000" step="50" value="9000">
+        </div>
+        <div class="control-row">
+          <label for="specRippleDb">Max passband ripple (dB)</label>
+          <input id="specRippleDb" type="number" min="0.01" max="12" step="0.05" value="1.5">
+        </div>
+        <div class="control-row">
+          <label for="specAttenDb">Min stopband attenuation (dB)</label>
+          <input id="specAttenDb" type="number" min="1" max="140" step="1" value="40">
+        </div>
+        <div class="control-row">
+          <label for="specSymmetryErr">Max phase symmetry error</label>
+          <input id="specSymmetryErr" type="number" min="0" max="1" step="0.0001" value="0.001">
+        </div>
+        <div class="spec-verdict">
+          <span id="specBadge" class="badge" aria-live="polite">SPEC --</span>
+          <button id="bookmarkBtn" class="btn btn-ghost" type="button" title="Copy a bookmark URL holding the current settings">Copy bookmark URL</button>
+        </div>
+      </div>
+
       <div class="button-grid">
         <button id="resetBtn" class="btn btn-ghost" type="button">Reset</button>
         <button id="randomBtn" class="btn btn-ghost" type="button">New seed</button>
@@ -197,6 +226,7 @@
           <div class="seg-row" role="group" aria-label="Bode view">
             <button class="seg" data-bode="mag" aria-pressed="true" type="button">Magnitude</button>
             <button class="seg" data-bode="phase" aria-pressed="false" type="button">Phase</button>
+            <button class="seg" data-bode="phaseUnwrapped" aria-pressed="false" type="button">Phase (unwrapped)</button>
             <button class="seg" data-bode="grpDelay" aria-pressed="false" type="button">Group delay</button>
           </div>
           <canvas id="bodeCanvas" width="880" height="240" tabindex="0" role="application" aria-label="Bode plot of the designed biquad. Use arrow keys to move the probe, Enter to pin it."></canvas>
@@ -210,6 +240,29 @@
             <desc>Zeros shown as circles, poles as crosses, with the unit circle.</desc>
           </svg>
           <p id="poleZeroNote" class="readout">All poles must lie inside the unit circle for stability.</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>FIR response</h2><span class="plot-note">magnitude / unwrapped phase / group delay</span></div>
+          <div class="seg-row" role="group" aria-label="FIR response view">
+            <button class="seg" data-firview="mag" aria-pressed="true" type="button">Magnitude</button>
+            <button class="seg" data-firview="phaseUnwrapped" aria-pressed="false" type="button">Phase (unwrapped)</button>
+            <button class="seg" data-firview="grpDelay" aria-pressed="false" type="button">Group delay</button>
+          </div>
+          <canvas id="firBodeCanvas" width="880" height="240" tabindex="0" role="application" aria-label="FIR magnitude, unwrapped phase and group delay sweep. Use arrow keys to move the probe, Enter to pin it."></canvas>
+          <p id="firBodeReadout" class="readout" aria-live="off">Probe: DC</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>FIR z-plane zeros</h2><span class="plot-note">unit-circle and off-axis roots</span></div>
+          <svg id="firZeroSvg" viewBox="0 0 400 400" role="img" aria-label="FIR zero plot with unit circle. Activate a marker for its exact coordinates."></svg>
+          <p id="firZeroNote" class="readout">Zeros of the designed FIR. Select a marker for exact coordinates and multiplicity.</p>
+        </article>
+
+        <article class="panel plot-panel">
+          <div class="plot-head"><h2>Spec mask verifier</h2><span class="plot-note">target compliance</span></div>
+          <canvas id="specCanvas" width="880" height="220" tabindex="0" role="application" aria-label="Magnitude response against the target specification mask"></canvas>
+          <p id="specReadout" class="readout">Mask: passband, transition and stopband edges from the target specification.</p>
         </article>
 
         <article class="panel plot-panel">
@@ -231,6 +284,27 @@
         </article>
       </div>
 
+      <div class="panel audition-panel">
+        <div class="export-head"><h2>WebAudio A/B audition</h2><span class="plot-note">synthesized locally, no audio files</span></div>
+        <div class="export-buttons">
+          <button id="audDryBtn" class="btn" type="button">Play dry</button>
+          <button id="audWetBtn" class="btn" type="button">Play filtered</button>
+          <button id="audFirBtn" class="btn" type="button">Play FIR output</button>
+          <button id="audStopBtn" class="btn btn-ghost" type="button">Stop</button>
+          <label class="aud-level" for="audGain">Level
+            <input id="audGain" type="range" min="0" max="1" step="0.01" value="0.35">
+          </label>
+          <button id="audMuteBtn" class="btn btn-ghost" type="button" aria-pressed="false">Mute</button>
+        </div>
+        <p id="audNote" class="hint">Looping the current benchmark stimulus through the WebAudio engine. Level is safety-clamped.</p>
+      </div>
+
+      <div class="panel selftest-panel">
+        <div class="export-head"><h2>In-page self-test battery</h2><span class="plot-note">numerical verification</span></div>
+        <button id="selfTestBtn" class="btn btn-primary" type="button">Run self-tests</button>
+        <ul id="selfTestList" class="selftest-list" aria-live="polite"></ul>
+      </div>
+
       <div class="panel export-panel">
         <div class="export-head"><h2>Export experiment</h2><span id="exportNote" class="hint">Files are generated locally from the current state.</span></div>
         <div class="export-buttons">
@@ -239,6 +313,10 @@
           <button id="bodeCsvBtn" class="btn" type="button">Bode CSV</button>
           <button id="spectrumCsvBtn" class="btn" type="button">Spectrum CSV</button>
           <button id="cHeaderBtn" class="btn" type="button">C header</button>
+          <button id="embeddedHeaderBtn" class="btn" type="button">filter_coeffs.h</button>
+          <button id="pythonBtn" class="btn" type="button">Python/SciPy</button>
+          <button id="reportJsonBtn" class="btn" type="button">Report JSON (SHA-256)</button>
+          <button id="reportCsvBtn" class="btn" type="button">Report CSV (SHA-256)</button>
           <button id="wavInputBtn" class="btn" type="button">WAV: input</button>
           <button id="wavOutputBtn" class="btn" type="button">WAV: filtered</button>
         </div>

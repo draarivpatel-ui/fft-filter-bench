@@ -33,8 +33,11 @@ test('startup binds the real DSP engine and renders every plot without errors', 
   assert.match(h.get('statusLine').textContent, /2048-point FFT/);
   assert.equal(h.get('statStability').textContent, 'STABLE');
   assert.equal(h.get('statFinite').textContent, 'PASS');
-  assert.equal(h.get('poleZeroSvg').querySelectorAll('title').length, 1);
+  const titles = h.get('poleZeroSvg').querySelectorAll('title');
+  assert.ok(titles.length >= 3, 'one svg caption plus per-marker coordinate tooltips');
+  assert.equal(titles[0].textContent, 'Pole-zero plane');
   assert.equal(h.get('poleZeroSvg').querySelectorAll('desc').length, 1);
+  assert.ok(h.get('poleZeroSvg').querySelectorAll('.pz-mark').length >= 3, 'interactive pole/zero markers');
   assert.ok(h.get('poleZeroSvg').querySelectorAll('circle').length >= 6);
   assert.ok(h.get('coeffTable').querySelectorAll('tbody tr').length >= 10);
   for (const id of ['signalCanvas', 'spectrumCanvas', 'bodeCanvas', 'firCanvas']) {
@@ -118,7 +121,7 @@ test('spectrum window and plot mode selections are applied to the real data', ()
 test('Bode segment buttons change the plotted channel and keep one pressed', () => {
   const h = bench();
   const buttons = h.document.querySelectorAll('[data-bode]');
-  assert.equal(buttons.length, 3);
+  assert.equal(buttons.length, 4);
   for (const b of buttons) {
     b.click();
     assert.equal(b.getAttribute('aria-pressed'), 'true');

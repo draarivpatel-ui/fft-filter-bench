@@ -459,7 +459,7 @@ export function biquadBode(coeffs, nPoints = 512) {
     phase[i] = r.phase;
     grpDelay[i] = r.groupDelay;
   }
-  return { freq, mag, phase, grpDelay };
+  return { freq, mag, phase, phaseUnwrapped: unwrapPhase(phase), grpDelay };
 }
 
 export function poleZeroPlotData(coeffs) {
@@ -673,6 +673,1124 @@ export function renderBodeGroupDelaySVG(bode, width = 600, height = 300) {
   // Group delay diverges at transmission zeros, so clamp for display only.
   const clamped = { freq: bode.freq, grpDelay: Array.from(bode.grpDelay, v => clamp(v, -100, 100)) };
   return bodeSVG(clamped, 'grpDelay', '#ff0', 'Group delay (samples)', width, height);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase unwrapping and FIR response analysis                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Unwrap a wrapped phase sequence (radians). Each step is wrapped into
+ * (-PI, PI] and accumulated, so 2*PI jumps disappear. Returns a new array;
+ * length zero returns an empty Float64Array.
+ */
+export function unwrapPhase(phases) {
+  const n = phases.length;
+  const out = new Float64Array(n);
+  if (!n) return out;
+  out[0] = phases[0];
+  for (let i = 1; i < n; i++) {
+    let d = phases[i] - phases[i - 1];
+    d -= TAU * Math.floor(d / TAU + 0.5);
+    out[i] = out[i - 1] + d;
+  }
+  return out;
+}
+
+/**
+ * Full FIR frequency response: magnitude, wrapped phase and analytic group
+ * delay in samples. H(e^jw) = sum h_k e^(-jwk). At an exact transmission
+ * zero the analytic delay is 0/0, so the value at a nearby frequency is
+ * returned instead of NaN (same convention as biquadFrequencyResponse).
+ */
+export function firFrequencyResponseEx(coefficients, w) {
+  for (let i = 0; i < coefficients.length; i++) {
+    if (!Number.isFinite(coefficients[i])) throw new RangeError('fir coefficients must be finite');
+  }
+  let br = 0, bi = 0, dbr = 0, dbi = 0;
+  for (let k = 0; k < coefficients.length; k++) {
+    const c = Math.cos(k * w), s = -Math.sin(k * w);
+    br += coefficients[k] * c;
+    bi += coefficients[k] * s;
+    dbr += -k * coefficients[k] * c;
+    dbi += -k * coefficients[k] * s;
+  }
+  const b2 = br * br + bi * bi;
+  const magnitude = Math.sqrt(b2);
+  const phase = Math.atan2(bi, br);
+  let groupDelay;
+  if (b2 < 1e-24) {
+    const h = 1e-5;
+    const near = firFrequencyResponseEx(coefficients, clamp(w + (w < PI * 0.5 ? h : -h), 0, PI));
+    groupDelay = Number.isFinite(near.groupDelay) ? near.groupDelay : 0;
+  } else {
+    groupDelay = -(dbr * br + dbi * bi) / b2;
+  }
+  return { magnitude, phase, groupDelay };
+}
+
+/** FIR Bode sweep mirroring biquadBode, with both wrapped and unwrapped phase. */
+export function firBode(coefficients, nPoints = 512) {
+  if (!Number.isInteger(nPoints) || nPoints < 2) throw new RangeError('nPoints must be >= 2');
+  const freq = new Float64Array(nPoints), mag = new Float64Array(nPoints);
+  const phase = new Float64Array(nPoints), grpDelay = new Float64Array(nPoints);
+  for (let i = 0; i < nPoints; i++) {
+    const w = PI * i / (nPoints - 1);
+    freq[i] = w / PI;
+    const r = firFrequencyResponseEx(coefficients, w);
+    mag[i] = linearToDb(r.magnitude);
+    phase[i] = r.phase;
+    grpDelay[i] = r.groupDelay;
+  }
+  return { freq, mag, phase, phaseUnwrapped: unwrapPhase(phase), grpDelay };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Polynomial roots and FIR z-plane analysis                                  */
+/* -------------------------------------------------------------------------- */
+
+function hornerComplex(a, zr, zi) {
+  // Evaluate a real polynomial (descending powers) at complex z.
+  let pr = a[0], pi = 0;
+  for (let j = 1; j < a.length; j++) {
+    const tr = pr * zr - pi * zi + a[j];
+    pi = pr * zi + pi * zr;
+    pr = tr;
+  }
+  return { real: pr, imag: pi };
+}
+
+function csqrt(re, im) {
+  const mag = Math.hypot(re, im);
+  if (mag === 0) return { real: 0, imag: 0 };
+  const s = Math.sqrt((mag + Math.abs(re)) / 2);
+  if (re >= 0) return { real: s, imag: im / (2 * s) };
+  return { real: Math.abs(im) / (2 * s), imag: (im < 0 ? -1 : 1) * s };
+}
+
+/**
+ * One Laguerre step for a complex-coefficient polynomial stored in parallel
+ * real/imag arrays (descending powers, degree m). Laguerre converges
+ * cubically and stays robust on clustered unit-circle roots where
+ * Durand-Kerner diverges.
+ */
+function laguerreRoot(ar, ai, m, guess, tol, maxIter) {
+  let xr = guess.real, xi = guess.imag;
+  for (let iter = 0; iter < maxIter; iter++) {
+    // Horner pass: b = p(z), d = p'(z), f = p''(z)/2, with a rounding bound.
+    let br = ar[0], bi = ai[0], dr = 0, di = 0, fr = 0, fi = 0;
+    let err = Math.hypot(br, bi);
+    const abx = Math.hypot(xr, xi);
+    for (let j = 1; j <= m; j++) {
+      let tr = fr * xr - fi * xi + dr, ti = fr * xi + fi * xr + di; fr = tr; fi = ti;
+      tr = dr * xr - di * xi + br; ti = dr * xi + di * xr + bi; dr = tr; di = ti;
+      tr = br * xr - bi * xi + ar[j]; ti = br * xi + bi * xr + ai[j]; br = tr; bi = ti;
+      err = Math.hypot(br, bi) + abx * err;
+    }
+    err *= 1e-15 * (m + 1);
+    if (Math.hypot(br, bi) <= 20 * err) return { z: { real: xr, imag: xi }, ok: true, iterations: iter + 1 };
+    // G = p'/p, H = G^2 - p''/p
+    const den = br * br + bi * bi;
+    const gr = (dr * br + di * bi) / den, gi = (di * br - dr * bi) / den;
+    const g2r = gr * gr - gi * gi, g2i = 2 * gr * gi;
+    const fbr = (fr * br + fi * bi) / den, fbi = (fi * br - fr * bi) / den;
+    const hr = g2r - 2 * fbr, hi = g2i - 2 * fbi;
+    const sq = csqrt((m - 1) * (m * hr - g2r), (m - 1) * (m * hi - g2i));
+    const p1r = gr + sq.real, p1i = gi + sq.imag;
+    const p2r = gr - sq.real, p2i = gi - sq.imag;
+    const [denR, denI] = (p1r * p1r + p1i * p1i >= p2r * p2r + p2i * p2i) ? [p1r, p1i] : [p2r, p2i];
+    const d2 = denR * denR + denI * denI;
+    let dxr, dxi;
+    if (d2 < 1e-30) { dxr = 1e-3 * Math.cos(iter); dxi = 1e-3 * Math.sin(iter); }
+    else { dxr = m * denR / d2; dxi = -m * denI / d2; }
+    const nxr = xr - dxr, nxi = xi - dxi;
+    const small = Math.abs(nxr - xr) <= tol * Math.max(1, Math.abs(nxr)) &&
+      Math.abs(nxi - xi) <= tol * Math.max(1, Math.abs(nxi));
+    xr = nxr; xi = nxi;
+    if (small) return { z: { real: xr, imag: xi }, ok: true, iterations: iter + 1 };
+    // Occasional fractional step breaks periodic stalls.
+    if (iter % 10 === 9) { xr += dxr * 0.2; xi += dxi * 0.2; }
+  }
+  return { z: { real: xr, imag: xi }, ok: false, iterations: maxIter };
+}
+
+/** Backward error of z against a: |P(z)| / sum_j |a_j| |z|^j. Certified ~1e-15. */
+function polyBackwardError(a, zr, zi) {
+  const zm = Math.max(Math.hypot(zr, zi), 1e-300);
+  let pr = a[0], pi = 0, nrm = Math.abs(a[0]);
+  for (let j = 1; j < a.length; j++) {
+    const tr = pr * zr - pi * zi + a[j];
+    pi = pr * zi + pi * zr;
+    pr = tr;
+    nrm = nrm * zm + Math.abs(a[j]);
+  }
+  return Math.hypot(pr, pi) / Math.max(nrm, 1e-300);
+}
+
+/**
+ * Diagonal-similarity balancing of a square matrix in place. Reduces the
+ * norm disparity between rows and columns so the QR iteration resolves
+ * clustered eigenvalues more accurately (NR balanc, radix 2).
+ */
+function balanceMatrix(h, n) {
+  let anotherPass = true;
+  for (let it = 0; anotherPass && it < 5; it++) {
+    anotherPass = false;
+    for (let i = 0; i < n; i++) {
+      let r = 0, c = 0;
+      for (let j = 0; j < n; j++) {
+        if (j !== i) { c += Math.abs(h[j][i]); r += Math.abs(h[i][j]); }
+      }
+      if (c === 0 || r === 0) continue;
+      let g = r / 2, f = 1;
+      const s = c + r;
+      while (c < g) { f *= 2; c *= 4; }
+      g = r * 2;
+      while (c > g) { f /= 2; c /= 4; }
+      if ((c + r) / f < 0.95 * s) {
+        anotherPass = true;
+        const inv = 1 / f;
+        for (let j = 0; j < n; j++) h[i][j] *= inv;
+        for (let j = 0; j < n; j++) h[j][i] *= f;
+      }
+    }
+  }
+}
+
+/**
+ * Eigenvalues of a real upper-Hessenberg matrix via the Francis
+ * double-shift QR iteration (NR hqr, 0-indexed). Fills wr/wi and returns
+ * whether the iteration exhausted its budget before full deflation.
+ */
+function hqrEigen(h, n, wr, wi) {
+  let anorm = 0;
+  for (let i = 0; i < n; i++)
+    for (let j = Math.max(i - 1, 0); j < n; j++) anorm += Math.abs(h[i][j]);
+  let nn = n - 1;
+  let t = 0;
+  let totalIts = 0;
+  const maxIts = n * 60 + 200;
+  while (nn >= 0) {
+    let its = 0;
+    let l = 0;
+    do {
+      for (l = nn; l >= 1; l--) {
+        let s = Math.abs(h[l - 1][l - 1]) + Math.abs(h[l][l]);
+        if (s === 0) s = anorm;
+        if (Math.abs(h[l][l - 1]) + s === s) break;
+      }
+      let x = h[nn][nn];
+      if (l === nn) {
+        wr[nn] = x + t;
+        wi[nn] = 0;
+        nn--;
+      } else {
+        let y = h[nn - 1][nn - 1];
+        let w = h[nn][nn - 1] * h[nn - 1][nn];
+        if (l === nn - 1) {
+          const p = 0.5 * (y - x);
+          const q = p * p + w;
+          const z = Math.sqrt(Math.abs(q));
+          const xx = x + t;
+          if (q >= 0) {
+            const zz = p + (p < 0 ? -z : z);
+            wr[nn - 1] = wr[nn] = xx + zz;
+            if (zz !== 0) wr[nn] = xx - w / zz;
+            wi[nn - 1] = wi[nn] = 0;
+          } else {
+            wr[nn - 1] = wr[nn] = xx + p;
+            wi[nn - 1] = -z;
+            wi[nn] = z;
+          }
+          nn -= 2;
+        } else {
+          if (its === 10 || its === 20) {
+            // Rare exceptional shift to break stagnation.
+            t += x;
+            for (let i = 0; i <= nn; i++) h[i][i] -= x;
+            const s = Math.abs(h[nn][nn - 1]) + Math.abs(h[nn - 1][nn - 2]);
+            y = x = 0.75 * s;
+            w = -0.4375 * s * s;
+          }
+          its++;
+          totalIts++;
+          if (totalIts > maxIts) return false;
+          let m;
+          let p = 0, q = 0, r = 0;
+          for (m = nn - 2; m >= l; m--) {
+            const z = h[m][m];
+            r = x - z;
+            let s = y - z;
+            p = (r * s - w) / h[m + 1][m] + h[m][m + 1];
+            q = h[m + 1][m + 1] - z - r - s;
+            r = h[m + 2][m + 1];
+            s = Math.abs(p) + Math.abs(q) + Math.abs(r);
+            p /= s;
+            q /= s;
+            r /= s;
+            if (m === l) break;
+            const u = Math.abs(h[m][m - 1]) * (Math.abs(q) + Math.abs(r));
+            const v = Math.abs(p) * (Math.abs(h[m - 1][m - 1]) + Math.abs(z) + Math.abs(h[m + 1][m + 1]));
+            if (u + v === v) break;
+          }
+          for (let i = m; i <= nn - 2; i++) {
+            h[i + 2][i] = 0;
+            if (i !== m) h[i + 2][i - 1] = 0;
+          }
+          for (let k = m; k <= nn - 1; k++) {
+            let xAbs = 0;
+            if (k !== m) {
+              p = h[k][k - 1];
+              q = h[k + 1][k - 1];
+              r = k !== nn - 1 ? h[k + 2][k - 1] : 0;
+              xAbs = Math.abs(p) + Math.abs(q) + Math.abs(r);
+              if (xAbs !== 0) { p /= xAbs; q /= xAbs; r /= xAbs; }
+            }
+            const s = (p < 0 ? -1 : 1) * Math.sqrt(p * p + q * q + r * r);
+            if (s !== 0) {
+              if (k === m) {
+                if (l !== m) h[k][k - 1] = -h[k][k - 1];
+              } else {
+                h[k][k - 1] = -s * xAbs;
+              }
+              p += s;
+              const xs = p / s;
+              const ys = q / s;
+              const zs = r / s;
+              q /= p;
+              r /= p;
+              for (let j = k; j <= nn; j++) {
+                let pp = h[k][j] + q * h[k + 1][j];
+                if (k !== nn - 1) {
+                  pp += r * h[k + 2][j];
+                  h[k + 2][j] -= pp * zs;
+                }
+                h[k + 1][j] -= pp * ys;
+                h[k][j] -= pp * xs;
+              }
+              const mmin = nn < k + 3 ? nn : k + 3;
+              for (let i = l; i <= mmin; i++) {
+                let pp = xs * h[i][k] + ys * h[i][k + 1];
+                if (k !== nn - 1) {
+                  pp += zs * h[i][k + 2];
+                  h[i][k + 2] -= pp * r;
+                }
+                h[i][k + 1] -= pp * q;
+                h[i][k] -= pp;
+              }
+            }
+          }
+        }
+      }
+    } while (l < nn - 1);
+  }
+  return true;
+}
+
+/**
+ * All roots of the monic-degree-n real polynomial via eigenvalues of its
+ * companion matrix. Always returns exactly n roots; no seeding or
+ * deflation, so clustered unit-circle spectra stay resolved.
+ */
+function companionRoots(a, n) {
+  const h = [];
+  for (let i = 0; i < n; i++) h.push(new Float64Array(n));
+  const a0 = a[0];
+  for (let j = 0; j < n; j++) h[0][j] = -a[j + 1] / a0;
+  for (let i = 1; i < n; i++) h[i][i - 1] = 1;
+  balanceMatrix(h, n);
+  const wr = new Float64Array(n), wi = new Float64Array(n);
+  const converged = hqrEigen(h, n, wr, wi);
+  const roots = [];
+  for (let i = 0; i < n; i++) roots.push({ real: wr[i], imag: wi[i] });
+  return { roots, converged };
+}
+
+/**
+ * Roots of a real polynomial a[0] z^n + a[1] z^(n-1) + ... + a[n].
+ *
+ * Degrees 1 and 2 use closed forms; higher degrees use companion-matrix
+ * eigenvalues (balanced Francis double-shift QR), then a Laguerre polish
+ * against the original polynomial. Every returned root is scored by its
+ * backward error |P(z)| / sum|a_j||z|^j; converged is true only when the
+ * worst root is below 1e-8. Roots are always returned, certified or not,
+ * so callers can draw an approximate diagram and label it honestly.
+ */
+export function polyRoots(coefficients, options = {}) {
+  const maxIter = options.maxIter ?? 150;
+  const tol = options.tol ?? 1e-13;
+  const roots = [];
+  let a = Array.from(coefficients, v => {
+    if (!Number.isFinite(v)) throw new RangeError('polynomial coefficients must be finite');
+    return v;
+  });
+  while (a.length > 1 && a[0] === 0) a.shift();
+  let originRoots = 0;
+  while (a.length > 1 && a[a.length - 1] === 0) { a.pop(); originRoots++; }
+  for (let i = 0; i < originRoots; i++) roots.push({ real: 0, imag: 0 });
+  const n = a.length - 1;
+  if (n === 0) return { roots, converged: true, maxResidual: 0, iterations: 0 };
+  if (n === 1) {
+    roots.push({ real: -a[1] / a[0], imag: 0 });
+    return { roots, converged: true, maxResidual: 0, iterations: 0 };
+  }
+  const lead = a[0];
+  a = a.map(v => v / lead);
+  if (n === 2) {
+    roots.push(...quadraticRoots(1, a[1], a[2]));
+    return { roots, converged: true, maxResidual: 0, iterations: 0 };
+  }
+  let { roots: eigRoots, converged } = companionRoots(a, n);
+  let iterations = 0;
+  // Polish each eigenvalue with Laguerre on the original polynomial.
+  const ar = Float64Array.from(a), ai = new Float64Array(a.length);
+  for (const root of eigRoots) {
+    if (!Number.isFinite(root.real) || !Number.isFinite(root.imag)) { converged = false; continue; }
+    const res = laguerreRoot(ar, ai, n, root, tol, maxIter);
+    iterations += res.iterations || maxIter;
+    if (res.ok) { root.real = res.z.real; root.imag = res.z.imag; }
+  }
+  let maxResidual = 0;
+  for (const r of eigRoots) {
+    const beta = polyBackwardError(a, r.real, r.imag);
+    if (!Number.isFinite(beta) || beta > 1e-8) converged = false;
+    if (Number.isFinite(beta)) maxResidual = Math.max(maxResidual, beta);
+  }
+  roots.push(...eigRoots);
+  return { roots, converged, maxResidual, iterations };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Symmetric FIR z-plane roots: exact 1-D scans for the structured roots,    */
+/* companion-QR for the rest, snap-to-scan repair for uncertified roots.     */
+/* -------------------------------------------------------------------------- */
+
+/** Real amplitude A(w) of a type-I (odd length, symmetric) FIR. */
+function firAmplitude(coefficients, w) {
+  const K = (coefficients.length - 1) / 2;
+  let a = coefficients[K];
+  for (let k = 0; k < K; k++) a += 2 * coefficients[k] * Math.cos((K - k) * w);
+  return a;
+}
+
+function firAmplitudeDeriv(coefficients, w) {
+  const K = (coefficients.length - 1) / 2;
+  let d = 0;
+  for (let k = 0; k < K; k++) d += -2 * coefficients[k] * (K - k) * Math.sin((K - k) * w);
+  return d;
+}
+
+function polyEvalReal(a, x) {
+  let p = a[0];
+  for (let i = 1; i < a.length; i++) p = p * x + a[i];
+  return p;
+}
+
+function polyDerivReal(a, x) {
+  let p = 0;
+  const n = a.length - 1;
+  for (let i = 0; i < n; i++) p = p * x + a[i] * (n - i);
+  return p;
+}
+
+/**
+ * Unit-circle zero angles of a type-I FIR: sign changes of A(w) on (0, PI)
+ * refined by bisection plus Newton on the analytic derivative. A zero at
+ * w = 0 or PI (z = 1 or -1) is reported when |A| vanishes there.
+ */
+function scanCircleRoots(coefficients, nScan = 8192) {
+  const wRoots = [];
+  let prevW = 0, prevY = firAmplitude(coefficients, 0);
+  const h = coefficients;
+  for (let i = 1; i <= nScan; i++) {
+    const w = PI * i / nScan;
+    const y = firAmplitude(h, w);
+    if (Number.isFinite(y) && Number.isFinite(prevY) && y * prevY < 0) {
+      let a = prevW, b = w, fa = prevY, mid = (a + b) / 2;
+      for (let it = 0; it < 80; it++) {
+        mid = (a + b) / 2;
+        const fm = firAmplitude(h, mid);
+        if (fm === 0 || (b - a) < 1e-14) break;
+        if (fa * fm < 0) b = mid; else { a = mid; fa = fm; }
+      }
+      for (let it = 0; it < 12; it++) {
+        const d = firAmplitudeDeriv(h, mid);
+        if (!Number.isFinite(d) || d === 0) break;
+        const step = firAmplitude(h, mid) / d;
+        mid -= step;
+        if (Math.abs(step) < 1e-15) break;
+      }
+      wRoots.push(clamp(mid, 0, PI));
+    }
+    prevW = w;
+    prevY = y;
+  }
+  return wRoots;
+}
+
+/**
+ * Real roots of P(x) = h[0] x^M + ... + h[M] with |x| > 1, found by a
+ * log-spaced sign-change scan on (1, e^5] for both signs. Reciprocal
+ * partners 1/x follow automatically for symmetric taps.
+ */
+function scanRealAxisRoots(coefficients, nScan = 4096) {
+  const roots = [];
+  for (const sign of [1, -1]) {
+    let prevX = 1, prevY = polyEvalReal(coefficients, sign);
+    for (let i = 1; i <= nScan; i++) {
+      const x = Math.exp(5 * i / nScan);
+      const y = polyEvalReal(coefficients, sign * x);
+      if (Number.isFinite(y) && Number.isFinite(prevY) && y * prevY < 0) {
+        let a = prevX, b = x, fa = prevY, mid = (a + b) / 2;
+        for (let it = 0; it < 80; it++) {
+          mid = (a + b) / 2;
+          const fm = polyEvalReal(coefficients, sign * mid);
+          if (fm === 0 || (b - a) < 1e-14 * mid) break;
+          if (fa * fm < 0) b = mid; else { a = mid; fa = fm; }
+        }
+        for (let it = 0; it < 12; it++) {
+          const d = sign * polyDerivReal(coefficients, sign * mid);
+          if (!Number.isFinite(d) || d === 0) break;
+          const step = polyEvalReal(coefficients, sign * mid) / d;
+          mid -= step;
+          if (Math.abs(step) < 1e-15 * mid) break;
+        }
+        roots.push(sign * mid);
+      }
+      prevX = x;
+      prevY = y;
+    }
+  }
+  return roots;
+}
+
+/**
+ * Structured root candidates for a type-I FIR: unit-circle conjugate
+ * pairs from the A(w) scan, endpoint roots at z = +/-1, and real
+ * reciprocal pairs from the P(x) scan on |x| > 1.
+ */
+function firStructuredRoots(coefficients) {
+  const h = coefficients;
+  const out = [];
+  for (const w of scanCircleRoots(h)) {
+    out.push({ real: Math.cos(w), imag: Math.sin(w) });
+    out.push({ real: Math.cos(w), imag: -Math.sin(w) });
+  }
+  const hMax = Math.max(1e-300, ...h.map(v => Math.abs(v)));
+  if (Math.abs(firAmplitude(h, 0)) < 1e-8 * hMax) {
+    out.push({ real: 1, imag: 0 }, { real: 1, imag: 0 });
+  }
+  if (Math.abs(firAmplitude(h, PI)) < 1e-8 * hMax) {
+    out.push({ real: -1, imag: 0 }, { real: -1, imag: 0 });
+  }
+  for (const x of scanRealAxisRoots(h)) {
+    out.push({ real: x, imag: 0 });
+    out.push({ real: 1 / x, imag: 0 });
+  }
+  return out;
+}
+
+/**
+ * Zeros of the FIR transfer function H(z) = sum h_k z^-k. Multiplying by
+ * z^(M-1) turns h into a plain polynomial in descending powers, so the
+ * zeros are exactly the roots of h. Poles sit at the origin with
+ * multiplicity M-1, which is why every FIR is BIBO stable.
+ *
+ * Roots come from companion-matrix eigenvalues (always exactly M-1 of
+ * them), each polished by Laguerre on the original taps and scored by
+ * backward error. For type-I symmetric designs, any root that stays
+ * uncertified is snapped to the nearest structured candidate (unit-circle
+ * pair or real reciprocal pair) when one lies close enough; the
+ * converged flag reports whether every final root is certified.
+ */
+export function firPoleZero(coefficients, options = {}) {
+  const taps = coefficients.length;
+  if (!Number.isInteger(taps) || taps < 1) throw new RangeError('coefficients must be a nonempty array');
+  for (const v of coefficients) {
+    if (!Number.isFinite(v)) throw new RangeError('fir coefficients must be finite');
+  }
+  const h = Array.from(coefficients);
+  const M = taps - 1;
+  const symErr = firSymmetryError(h);
+  const maxH = Math.max(...h.map(v => Math.abs(v)), 1e-300);
+  const isType1 = taps >= 3 && taps % 2 === 1 && symErr <= 1e-8 * maxH;
+  // Edge taps below ~1e-12 of the peak are numerically zero: each leading
+  // one pushes a root out to ~1/|h0| (unrepresentable, off every plot), and
+  // each trailing one contributes a genuine z = 0 root. Snap them to exact
+  // zero so the strip logic counts roots consistently.
+  const hSnap = h.map(v => (Math.abs(v) <= EPS * maxH ? 0 : v));
+  let lead = 0;
+  while (lead < M && hSnap[lead] === 0) lead++;
+  const hEff = hSnap.slice(lead);
+  const expectedFinite = hEff.length - 1;
+  const res = polyRoots(hEff, options);
+  const zeros = res.roots;
+  let converged = res.converged;
+  // Certification pass: backward error per root, then scan-snap repairs.
+  let betas = zeros.map(z => polyBackwardError(hSnap, z.real, z.imag));
+  let uncertified = betas.filter(b => !Number.isFinite(b) || b > 1e-10).length;
+  if (isType1 && uncertified > 0) {
+    const cands = firStructuredRoots(hSnap);
+    const used = new Set();
+    for (let i = 0; i < zeros.length; i++) {
+      if (Number.isFinite(betas[i]) && betas[i] <= 1e-10) continue;
+      let best = -1, bd = 0.05;
+      for (let j = 0; j < cands.length; j++) {
+        if (used.has(j)) continue;
+        const d = Math.hypot(zeros[i].real - cands[j].real, zeros[i].imag - cands[j].imag);
+        if (d < bd) { bd = d; best = j; }
+      }
+      if (best >= 0) {
+        zeros[i] = { real: cands[best].real, imag: cands[best].imag };
+        used.add(best);
+        betas[i] = polyBackwardError(hSnap, zeros[i].real, zeros[i].imag);
+      }
+    }
+    uncertified = betas.filter(b => !Number.isFinite(b) || b > 1e-10).length;
+  }
+  const finite = zeros.every(z => Number.isFinite(z.real) && Number.isFinite(z.imag));
+  if (!finite || zeros.length !== expectedFinite || uncertified > 0) converged = false;
+  const maxResidual = Math.max(0, ...betas.map(b => (Number.isFinite(b) ? b : Infinity)));
+  return {
+    zeros,
+    poles: [{ real: 0, imag: 0 }],
+    poleMultiplicity: Math.max(0, M),
+    converged,
+    method: 'companion-qr',
+    maxResidual,
+    uncertified,
+    expectedFinite,
+    droppedRoots: lead
+  };
+}
+
+/** Maximum |h[k] - h[M-1-k]|: the linear-phase symmetry error of the taps. */
+export function firSymmetryError(coefficients) {
+  let max = 0;
+  const m = coefficients.length - 1;
+  for (let k = 0; k < coefficients.length; k++) {
+    max = Math.max(max, Math.abs(coefficients[k] - coefficients[m - k]));
+  }
+  return max;
+}
+
+/** FIR stability summary. BIBO stable by construction; poles only at z = 0. */
+export function firStability(coefficients, options = {}) {
+  const pz = firPoleZero(coefficients, options);
+  const radii = pz.zeros.map(z => Math.hypot(z.real, z.imag));
+  const maxZeroRadius = radii.length ? Math.max(...radii) : 0;
+  return {
+    stable: true,
+    maxPoleRadius: 0,
+    poleMultiplicity: pz.poleMultiplicity,
+    zeros: pz.zeros,
+    maxZeroRadius,
+    minPhase: radii.every(r => r <= 1 + 1e-9),
+    symmetryError: firSymmetryError(coefficients),
+    converged: pz.converged,
+    maxResidual: pz.maxResidual
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Spec-mask compliance verification                                          */
+/* -------------------------------------------------------------------------- */
+
+// One transition-edge measurement: scanning outward from the passband edge in
+// direction `dir`, find the last frequency inside the ripple bound and the
+// first frequency at or below -attenDb. Width is their separation; Infinity
+// when the sweep never reaches the stopband level.
+function measureTransition(freq, mag, edgeFreq, rippleDb, attenDb, dir) {
+  const n = freq.length;
+  let i = 0;
+  if (dir > 0) { while (i < n && freq[i] < edgeFreq) i++; }
+  else { i = n - 1; while (i >= 0 && freq[i] > edgeFreq) i--; }
+  // The passband edge itself is the width's origin even when the response is
+  // already below the ripple bound there.
+  let fPass = edgeFreq, fStop = NaN;
+  let prevF = NaN, prevM = NaN;
+  while (i >= 0 && i < n) {
+    const f = freq[i], m = mag[i];
+    if (!Number.isFinite(m)) break;
+    if (m >= -rippleDb) fPass = f;
+    if (m <= -attenDb) {
+      // Interpolate between this sample and the previous one.
+      if (Number.isFinite(prevF) && prevM > -attenDb && m < prevM) {
+        const t = (-attenDb - prevM) / (m - prevM);
+        fStop = prevF + t * (f - prevF);
+      } else fStop = f;
+      break;
+    }
+    prevF = f; prevM = m;
+    i += dir;
+  }
+  return { fPass, fStop, width: Number.isFinite(fStop) ? Math.abs(fStop - fPass) : Infinity };
+}
+
+/**
+ * Verify a magnitude sweep against a target mask.
+ *
+ * sweep: { freq: 0..1 normalized (1 = Nyquist), mag: dB }
+ * spec:  { passband: [lo, hi], stopbands: [[lo, hi], ...], rippleDb,
+ *          attenDb, transitionWidth, symmetryErrorMax? }
+ * extras:{ symmetryError } - measured linear-phase error for FIR taps.
+ *
+ * Returns { pass, checks: [{name, spec, measured, pass}...],
+ *           measured: {...}, transitions: [...] }.
+ */
+export function specMaskCheck(sweep, spec, extras = {}) {
+  const { freq, mag } = sweep;
+  if (!freq || !mag || freq.length !== mag.length || freq.length < 2) {
+    throw new RangeError('sweep must provide equal-length freq and mag arrays');
+  }
+  const pb = spec.passband, sbList = spec.stopbands || [];
+  if (!Array.isArray(pb) || pb.length !== 2 || !(pb[0] < pb[1])) {
+    throw new RangeError('spec.passband must be [lo, hi] with lo < hi');
+  }
+  const rippleSpec = Number(spec.rippleDb), attenSpec = Number(spec.attenDb);
+  const widthSpec = Number(spec.transitionWidth);
+  for (const [v, name] of [[rippleSpec, 'rippleDb'], [attenSpec, 'attenDb'], [widthSpec, 'transitionWidth']]) {
+    if (!Number.isFinite(v) || v < 0) throw new RangeError(`spec.${name} must be a finite nonnegative number`);
+  }
+  // Every declared stopband must be well formed and must contain sweep
+  // points; otherwise attenuation is unverifiable and the check fails.
+  const sbValid = sbList.length > 0 &&
+    sbList.every(sb => Array.isArray(sb) && sb.length === 2 && sb[0] < sb[1]);
+  let pbMin = Infinity, pbMax = -Infinity, sbMax = -Infinity, sbPts = 0;
+  for (let i = 0; i < freq.length; i++) {
+    const f = freq[i], m = mag[i];
+    if (!Number.isFinite(m)) throw new RangeError(`sweep.mag[${i}] is not finite`);
+    if (f >= pb[0] - 1e-12 && f <= pb[1] + 1e-12) { pbMin = Math.min(pbMin, m); pbMax = Math.max(pbMax, m); }
+    for (const sb of sbList) {
+      if (f >= sb[0] - 1e-12 && f <= sb[1] + 1e-12) { sbMax = Math.max(sbMax, m); sbPts++; }
+    }
+  }
+  const sbUnverifiable = !sbValid || sbPts === 0;
+  const measuredRipple = pbMax > -Infinity ? pbMax - pbMin : Infinity;
+  const transitions = [];
+  for (const sb of sbList) {
+    if (sb[0] >= pb[1]) {
+      transitions.push({ edge: 'upper', ...measureTransition(freq, mag, pb[1], rippleSpec, attenSpec, +1) });
+    }
+    if (sb[1] <= pb[0]) {
+      transitions.push({ edge: 'lower', ...measureTransition(freq, mag, pb[0], rippleSpec, attenSpec, -1) });
+    }
+  }
+  const worstTransition = transitions.length ? Math.max(...transitions.map(t => t.width)) : 0;
+  const checks = [
+    { name: 'passbandRipple', spec: rippleSpec, measured: measuredRipple, pass: measuredRipple <= rippleSpec + 1e-9 },
+    { name: 'stopbandAttenuation', spec: attenSpec, measured: sbUnverifiable ? Infinity : -sbMax, pass: !sbUnverifiable && sbMax <= -attenSpec + 1e-9 },
+    { name: 'transitionWidth', spec: widthSpec, measured: worstTransition, pass: worstTransition <= widthSpec + 1e-9 }
+  ];
+  if (Number.isFinite(spec.symmetryErrorMax)) {
+    const sym = extras.symmetryError;
+    checks.push({
+      name: 'phaseSymmetry', spec: spec.symmetryErrorMax,
+      measured: Number.isFinite(sym) ? sym : NaN,
+      pass: Number.isFinite(sym) ? sym <= spec.symmetryErrorMax : false
+    });
+  }
+  const pass = checks.every(c => c.pass);
+  return {
+    pass,
+    checks,
+    transitions,
+    measured: {
+      passbandRippleDb: measuredRipple,
+      passbandMaxDb: pbMax,
+      stopbandMaxDb: sbMax,
+      worstTransitionWidth: worstTransition
+    }
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* SHA-256 fingerprinting (pure JS, no dependencies)                          */
+/* -------------------------------------------------------------------------- */
+
+function utf8Bytes(text) {
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    let cp = text.charCodeAt(i);
+    if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < text.length) {
+      const lo = text.charCodeAt(i + 1);
+      if (lo >= 0xdc00 && lo <= 0xdfff) { cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00); i++; }
+    }
+    if (cp < 0x80) out.push(cp);
+    else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+    else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    else out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+  }
+  return Uint8Array.from(out);
+}
+
+const SHA256_K = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+/** SHA-256 of a string (UTF-8) or byte array, returned as lowercase hex. */
+export function sha256Hex(input) {
+  const bytes = typeof input === 'string' ? utf8Bytes(input) : Uint8Array.from(input);
+  const bitLen = bytes.length * 8;
+  const padded = Math.ceil((bytes.length + 9) / 64) * 64;
+  const msg = new Uint8Array(padded);
+  msg.set(bytes);
+  msg[bytes.length] = 0x80;
+  const view = new DataView(msg.buffer);
+  view.setUint32(padded - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(padded - 4, bitLen >>> 0, false);
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Int32Array(64);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let block = 0; block < padded; block += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getInt32(block + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, hh = h7;
+    for (let i = 0; i < 64; i++) {
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (hh + s1 + ch + SHA256_K[i] + w[i]) | 0;
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (s0 + maj) | 0;
+      hh = g; g = f; f = e; e = (d + t1) | 0;
+      d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0;
+    h4 = (h4 + e) | 0; h5 = (h5 + f) | 0; h6 = (h6 + g) | 0; h7 = (h7 + hh) | 0;
+  }
+  return [h0, h1, h2, h3, h4, h5, h6, h7].map(v => (v >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+/**
+ * Deterministic JSON: object keys sorted recursively, no whitespace.
+ * Throws on non-finite numbers so a fingerprint never silently covers NaN.
+ */
+export function canonicalJson(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new RangeError('canonicalJson cannot encode non-finite numbers');
+    return JSON.stringify(value);
+  }
+  if (ArrayBuffer.isView(value)) value = Array.from(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
+  if (typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}';
+  }
+  throw new RangeError('canonicalJson cannot encode ' + typeof value);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Embedded and notebook exporters                                            */
+/* -------------------------------------------------------------------------- */
+
+function safeIdent(name) {
+  let s = String(name).replace(/[^A-Za-z0-9_]/g, '_');
+  if (!/^[A-Za-z_]/.test(s)) s = '_' + s;
+  return s;
+}
+
+function floatList(values) {
+  return values.map(v => Number(v).toPrecision(12)).join(', ');
+}
+
+// Signed Q2.30 spans [-2, 2): the most negative raw value is -2^31.
+function q30(value) {
+  return Math.round(clamp(value, -2, 2 - Math.pow(2, -30)) * (1 << 30));
+}
+
+/**
+ * Embedded-ready C/C++ header with both float and fixed-point (Q2.30)
+ * coefficient arrays. Covers the biquad and, optionally, the FIR design.
+ */
+export function exportEmbeddedHeader(options = {}) {
+  const name = safeIdent(options.name ?? 'filter');
+  const upper = name.toUpperCase();
+  const guard = `${upper}_COEFFS_H`;
+  const iir = options.iir;
+  if (iir) for (const k of ['b0', 'b1', 'b2', 'a1', 'a2']) {
+    if (!isFiniteNumber(iir[k])) throw new RangeError(`coefficient ${k} is not finite`);
+  }
+  const fir = options.fir;
+  if (fir) for (let i = 0; i < fir.length; i++) {
+    if (!Number.isFinite(fir[i])) throw new RangeError(`fir tap ${i} is not finite`);
+  }
+  const L = [];
+  L.push('/* Auto-generated by FFT Filter Bench. Zero dependencies. */');
+  L.push('/* IIR is Direct Form II Transposed with a0 normalized to 1. */');
+  L.push('/* Fixed-point arrays are signed Q2.30: raw / 2^30 = real value. */');
+  L.push(`#ifndef ${guard}`, `#define ${guard}`, '', '#include <stdint.h>', '');
+  if (iir) {
+    L.push(`#define ${upper}_IIR_B0 ${iir.b0.toPrecision(12)}`);
+    L.push(`#define ${upper}_IIR_B1 ${iir.b1.toPrecision(12)}`);
+    L.push(`#define ${upper}_IIR_B2 ${iir.b2.toPrecision(12)}`);
+    L.push(`#define ${upper}_IIR_A1 ${iir.a1.toPrecision(12)}`);
+    L.push(`#define ${upper}_IIR_A2 ${iir.a2.toPrecision(12)}`, '');
+    L.push(`static const float ${name}_b[3] = { ${floatList([iir.b0, iir.b1, iir.b2])} };`);
+    L.push(`static const float ${name}_a[3] = { 1.0, ${floatList([iir.a1, iir.a2])} };`);
+    L.push(`static const int32_t ${name}_b_q30[3] = { ${[iir.b0, iir.b1, iir.b2].map(q30).join(', ')} };`);
+    L.push(`static const int32_t ${name}_a_q30[3] = { ${(1 << 30)}, ${[iir.a1, iir.a2].map(q30).join(', ')} };`, '');
+    L.push(`static inline float ${name}_process(float x, float *w1, float *w2) {`);
+    L.push(`    float y = ${upper}_IIR_B0 * x + *w1;`);
+    L.push(`    *w1 = ${upper}_IIR_B1 * x - ${upper}_IIR_A1 * y + *w2;`);
+    L.push(`    *w2 = ${upper}_IIR_B2 * x - ${upper}_IIR_A2 * y;`);
+    L.push('    return y;', '}', '');
+  }
+  if (fir) {
+    L.push(`#define ${upper}_FIR_TAPS ${fir.length}`);
+    L.push(`static const float ${name}_fir_b[${fir.length}] = { ${floatList(fir)} };`);
+    L.push(`static const int32_t ${name}_fir_b_q30[${fir.length}] = { ${Array.from(fir, q30).join(', ')} };`, '');
+  }
+  L.push(`#endif /* ${guard} */`, '');
+  return L.join('\n');
+}
+
+/** Python/SciPy snippet that rebuilds the designed filters with numpy+scipy. */
+export function exportPythonSnippet(options = {}) {
+  const name = safeIdent(options.name ?? 'filter');
+  const iir = options.iir;
+  if (iir) for (const k of ['b0', 'b1', 'b2', 'a1', 'a2']) {
+    if (!isFiniteNumber(iir[k])) throw new RangeError(`coefficient ${k} is not finite`);
+  }
+  const fir = options.fir;
+  if (fir) for (let i = 0; i < fir.length; i++) {
+    if (!Number.isFinite(fir[i])) throw new RangeError(`fir tap ${i} is not finite`);
+  }
+  const fs = isFiniteNumber(options.sampleRate) ? options.sampleRate : 48000;
+  const L = [];
+  L.push('# Auto-generated by FFT Filter Bench. Requires numpy and scipy.');
+  L.push('import numpy as np');
+  L.push('from scipy import signal');
+  L.push('');
+  L.push(`SAMPLE_RATE = float(${fs})`);
+  if (iir) {
+    L.push(`${name}_b = np.array([${floatList([iir.b0, iir.b1, iir.b2])}])`);
+    L.push(`${name}_a = np.array([1.0, ${floatList([iir.a1, iir.a2])}])`);
+    L.push(`w, ${name}_h = signal.freqz(${name}_b, ${name}_a, worN=512)`);
+    L.push(`# y = signal.lfilter(${name}_b, ${name}_a, x)`);
+  }
+  if (fir) {
+    L.push(`${name}_fir = np.array([${floatList(fir)}])`);
+    L.push(`wf, ${name}_fir_h = signal.freqz(${name}_fir, [1.0], worN=512)`);
+    L.push(`# y_fir = signal.lfilter(${name}_fir, [1.0], x)`);
+  }
+  L.push('');
+  return L.join('\n');
+}
+
+// Canonical report object shared by the JSON and CSV exporters, so both
+// fingerprint the same content.
+function designReportData(payload = {}) {
+  return {
+    config: payload.config ?? {},
+    iir: payload.iir ?? null,
+    fir: payload.fir ?? null,
+    stability: payload.stability ?? null,
+    specCheck: payload.specCheck ?? null,
+    metrics: payload.metrics ?? {}
+  };
+}
+
+/**
+ * SHA-256 fingerprinted design report. The fingerprint covers the canonical
+ * JSON of `report`, so two identical designs always fingerprint identically.
+ */
+export function exportDesignReport(payload = {}) {
+  const report = designReportData(payload);
+  const fingerprint = sha256Hex(canonicalJson(report));
+  return JSON.stringify({
+    schemaVersion: SCHEMA_VERSION,
+    generator: 'fft-filter-bench',
+    fingerprintAlgorithm: 'SHA-256',
+    fingerprint,
+    report
+  }, null, 2);
+}
+
+/** Flat CSV design summary carrying the same SHA-256 fingerprint. */
+export function exportDesignReportCSV(payload = {}) {
+  const report = designReportData(payload);
+  const fingerprint = sha256Hex(canonicalJson(report));
+  const rows = [['field', 'value']];
+  rows.push(['generator', 'fft-filter-bench']);
+  rows.push(['schema_version', String(SCHEMA_VERSION)]);
+  rows.push(['fingerprint_sha256', fingerprint]);
+  const cfg = report.config || {};
+  for (const key of Object.keys(cfg).sort()) rows.push(['config_' + key, String(cfg[key])]);
+  if (report.iir) {
+    for (const key of ['b0', 'b1', 'b2', 'a1', 'a2']) rows.push(['iir_' + key, String(report.iir[key])]);
+  }
+  if (report.fir && report.fir.taps != null) rows.push(['fir_taps', String(report.fir.taps)]);
+  if (report.stability) {
+    rows.push(['stable', String(report.stability.stable)]);
+    if (report.stability.maxPoleRadius != null) rows.push(['max_pole_radius', String(report.stability.maxPoleRadius)]);
+  }
+  if (report.specCheck) {
+    if (report.specCheck.fir) rows.push(['spec_fir_pass', String(report.specCheck.fir.pass)]);
+    if (report.specCheck.iir) rows.push(['spec_iir_pass', String(report.specCheck.iir.pass)]);
+  }
+  return rows.map(r => r.map(csvField).join(',')).join('\n') + '\n';
+}
+
+/* -------------------------------------------------------------------------- */
+/* URL-hash bookmark codec                                                    */
+/* -------------------------------------------------------------------------- */
+
+// Ordered key table: [hashKey, configKey, kind]. kinds: num, int, str, enum.
+const HASH_SCHEMA = [
+  ['p', 'preset', 'str'], ['fam', 'family', 'str'], ['fc', 'fc', 'num'],
+  ['rp', 'rippleDb', 'num'], ['q', 'Q', 'num'], ['sr', 'sampleRate', 'int'],
+  ['n', 'fftSize', 'int'], ['t1', 'tone1Hz', 'num'], ['t2', 'tone2Hz', 'num'],
+  ['nz', 'noise', 'num'], ['sd', 'seed', 'int'], ['ft', 'firTaps', 'int'],
+  ['wn', 'window', 'str'], ['sw', 'spectrumWindow', 'str'], ['pm', 'plotMode', 'str'],
+  ['bv', 'bodeView', 'str'], ['fv', 'firView', 'str'],
+  ['e1', 'specEdge1Hz', 'num'], ['e2', 'specEdge2Hz', 'num'],
+  ['srp', 'specRippleDb', 'num'], ['sat', 'specAttenDb', 'num'],
+  ['ssy', 'specSymmetryErr', 'num']
+];
+export const CONFIG_HASH_VERSION = '2';
+
+/** Serialize a config object into a compact bookmark hash string (no '#'). */
+export function serializeConfigHash(config = {}) {
+  const parts = ['v=' + CONFIG_HASH_VERSION];
+  for (const [hk, ck, kind] of HASH_SCHEMA) {
+    const v = config[ck];
+    if (v === undefined || v === null) continue;
+    if ((kind === 'num' || kind === 'int') && !Number.isFinite(Number(v))) continue;
+    const enc = kind === 'str'
+      ? String(v).replace(/[^A-Za-z0-9_.-]/g, '')
+      : String(kind === 'int' ? Math.trunc(Number(v)) : Number(v));
+    if (enc === '' || enc === 'NaN' || enc === 'Infinity' || enc === '-Infinity') continue;
+    parts.push(hk + '=' + enc);
+  }
+  return parts.join('&');
+}
+
+/**
+ * Parse a bookmark hash string ('#' optional) into a plain config object.
+ * Returns null when the string carries no recognizable version marker, so a
+ * page shared without a hash starts from defaults instead of corrupt state.
+ * Unknown keys are ignored; non-numeric junk is dropped field by field.
+ */
+export function parseConfigHash(text) {
+  const raw = String(text ?? '').replace(/^#/, '');
+  if (!raw) return null;
+  const pairs = {};
+  for (const part of raw.split('&')) {
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    pairs[part.slice(0, eq)] = part.slice(eq + 1);
+  }
+  if (pairs.v !== CONFIG_HASH_VERSION) return null;
+  const config = {};
+  for (const [hk, ck, kind] of HASH_SCHEMA) {
+    if (!(hk in pairs)) continue;
+    const v = pairs[hk];
+    if (kind === 'str') {
+      if (/^[A-Za-z0-9_.-]+$/.test(v)) config[ck] = v;
+    } else {
+      const num = Number(v);
+      if (Number.isFinite(num)) config[ck] = kind === 'int' ? Math.trunc(num) : num;
+    }
+  }
+  return config;
+}
+
+/* -------------------------------------------------------------------------- */
+/* In-page self-test battery                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Engine self-verification: FFT/IFFT round trip, Parseval's theorem,
+ * Butterworth -3.01 dB at cutoff, FIR unity DC gain and constant group
+ * delay, BIBO pole stability for every design family, polynomial roots,
+ * SHA-256 known vectors and the spec-mask verifier itself.
+ */
+export function runSelfTests() {
+  const results = [];
+  const check = (name, pass, detail = '') => results.push({ name, pass: !!pass, detail: String(detail) });
+  try {
+    // 1. FFT / IFFT round trip error.
+    const N = 256, rand = (() => { let s = 0x1234567; return () => { s = (s + 0x6D2B79F5) >>> 0; return s / 4294967296; }; })();
+    const xr = new Float64Array(N), xi = new Float64Array(N);
+    for (let i = 0; i < N; i++) xr[i] = rand() * 2 - 1;
+    const r0 = xr.slice(), i0 = xi.slice();
+    fft(xr, xi, false); fft(xr, xi, true);
+    let maxErr = 0;
+    for (let i = 0; i < N; i++) maxErr = Math.max(maxErr, Math.abs(xr[i] - r0[i]), Math.abs(xi[i] - i0[i]));
+    check('FFT/IFFT round trip < 1e-10', maxErr < 1e-10, `max error ${maxErr.toExponential(2)}`);
+    // 2. Parseval energy.
+    const { real, imag } = fftReal(r0);
+    const p = parsevalEnergy(r0, null, real, imag);
+    const rel = Math.abs(p.timeEnergy - p.freqEnergy) / Math.max(p.timeEnergy, 1e-12);
+    check("Parseval's theorem holds", rel < 1e-12, `relative error ${rel.toExponential(2)}`);
+    // 3. Butterworth cutoff gain.
+    let worst = 0;
+    for (const fc of [0.02, 0.08, 0.15, 0.3, 0.45]) {
+      const c = butterworthLowpass(fc);
+      const magDb = linearToDb(biquadFrequencyResponse(c, TAU * fc).magnitude);
+      worst = Math.max(worst, Math.abs(magDb + 3.0103));
+    }
+    check('Butterworth -3.0103 dB at cutoff', worst < 0.02, `worst deviation ${worst.toFixed(4)} dB`);
+    // 4. FIR unity DC gain, symmetry and constant group delay.
+    const fir = designFirLowpass({ taps: 33, fc: 0.1, window: 'hamming' });
+    const dc = firFrequencyResponseEx(fir.coefficients, 0);
+    const gd = Math.abs(firFrequencyResponseEx(fir.coefficients, 0.37).groupDelay - 16);
+    const sym = firSymmetryError(fir.coefficients);
+    check('FIR unity DC gain', Math.abs(dc.magnitude - 1) < 1e-9, `DC gain ${dc.magnitude.toFixed(9)}`);
+    check('FIR linear-phase symmetry', sym < 1e-12, `symmetry error ${sym.toExponential(2)}`);
+    check('FIR constant group delay (taps-1)/2', gd < 1e-6, `group delay error ${gd.toExponential(2)}`);
+    // 5. BIBO stability of every design family.
+    let allStable = true, anyFinite = true;
+    for (const family of FILTER_FAMILIES) {
+      const c = designFilter({ family, fc: 0.15, rippleDb: 1, Q: 2 });
+      const st = biquadStability(c);
+      allStable = allStable && st.stable;
+      anyFinite = anyFinite && Number.isFinite(st.maxPoleRadius);
+    }
+    check('BIBO pole stability, all families', allStable && anyFinite, 'max |p_i| < 1 for butterworth, chebyshev, highpass, bandpass');
+    // 6. Known unstable denominator rejected.
+    const unstable = biquadStability({ b0: 1, b1: 0, b2: 0, a1: -2, a2: 1 });
+    check('Unstable poles detected', !unstable.stable && unstable.maxPoleRadius >= 1, `max pole radius ${unstable.maxPoleRadius.toFixed(4)}`);
+    // 7. Polynomial roots on a constructed quartic with roots at
+    // +/-0.5 and +/-i: (z^2 - 0.25)(z^2 + 1) = z^4 + 0.75 z^2 - 0.25.
+    const pr = polyRoots([1, 0, 0.75, 0, -0.25]);
+    const radii = pr.roots.map(r => Math.hypot(r.real, r.imag)).sort((x, y) => x - y);
+    const rootsOk = pr.converged && pr.roots.length === 4 &&
+      Math.abs(radii[0] - 0.5) < 1e-6 && Math.abs(radii[1] - 0.5) < 1e-6 &&
+      Math.abs(radii[2] - 1) < 1e-6 && Math.abs(radii[3] - 1) < 1e-6;
+    check('Laguerre polynomial roots', rootsOk, `residual ${pr.maxResidual.toExponential(2)}`);
+    // 8. SHA-256 known vectors.
+    const hAbc = sha256Hex('abc');
+    check('SHA-256 known vector', hAbc === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', hAbc.slice(0, 16) + '...');
+    // 9. Spec-mask verifier sanity on a brick-wall-like sweep.
+    const freq = new Float64Array(101), mag = new Float64Array(101);
+    for (let i = 0; i <= 100; i++) { freq[i] = i / 100; mag[i] = freq[i] <= 0.2 ? -0.5 : -80; }
+    const sc = specMaskCheck({ freq, mag }, { passband: [0, 0.2], stopbands: [[0.4, 1]], rippleDb: 1, attenDb: 40, transitionWidth: 0.25 });
+    check('Spec-mask verifier PASS case', sc.pass, `ripple ${sc.measured.passbandRippleDb.toFixed(2)} dB, atten ${sc.measured.stopbandMaxDb.toFixed(1)} dB`);
+    const scFail = specMaskCheck({ freq, mag }, { passband: [0, 0.2], stopbands: [[0.4, 1]], rippleDb: 0.25, attenDb: 90, transitionWidth: 0.05 });
+    check('Spec-mask verifier FAIL case', !scFail.pass, 'tight spec correctly fails');
+    // 10. Bode sweep stays finite even at transmission zeros.
+    const bode = biquadBode(designBandpass(0.2, 2), 256);
+    check('Bode sweep finite at zeros', bode.mag.every(Number.isFinite) && bode.grpDelay.every(Number.isFinite), '256-point sweep');
+  } catch (err) {
+    check('Self-test battery completed', false, 'threw: ' + err.message);
+  }
+  const pass = results.filter(r => r.pass).length;
+  return { ok: pass === results.length, pass, total: results.length, results };
 }
 
 /** Minimal standalone HTML snapshot. The interactive app is index.html. */

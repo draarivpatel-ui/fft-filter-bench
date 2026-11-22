@@ -135,8 +135,22 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .plot-panel { padding: 14px 16px 12px; min-width: 0; }
 .plot-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; margin-bottom: 10px; }
 .plot-note { font-size: 0.72rem; color: var(--muted); }
-canvas, svg#poleZeroSvg { display: block; width: 100%; height: auto; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
-svg#poleZeroSvg { max-width: 420px; margin: 0 auto; }
+canvas, svg#poleZeroSvg, svg#firZeroSvg { display: block; width: 100%; height: auto; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
+svg#poleZeroSvg, svg#firZeroSvg { max-width: 420px; margin: 0 auto; }
+.pz-mark { cursor: pointer; }
+.pz-mark:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pz-mult { font: 700 10px ui-monospace, Menlo, Consolas, monospace; fill: var(--text); }
+.spec-verdict { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+.badge-ok { background: var(--fir); border-color: var(--fir); color: #fff; font-weight: 700; }
+.badge-fail { background: var(--warn); border-color: var(--warn); color: #fff; font-weight: 700; }
+.audition-panel, .selftest-panel { padding: 14px 16px; }
+.aud-level { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
+.aud-level input[type="range"] { width: 120px; }
+.selftest-list { list-style: none; margin: 10px 0 0; padding: 0; max-height: 220px; overflow: auto; }
+.selftest-item { font: 0.78rem ui-monospace, Menlo, Consolas, monospace; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.selftest-item.pass { color: var(--fir); }
+.selftest-item.fail { color: var(--warn); font-weight: 700; }
+.selftest-item.summary { border-top: 2px solid var(--border); border-bottom: 0; font-weight: 700; margin-top: 4px; }
 .readout { font-size: 0.76rem; color: var(--muted); margin-top: 8px; min-height: 1.2em; }
 .seg-row { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
 .seg { border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); padding: 5px 11px; border-radius: 999px; font: inherit; font-size: 0.76rem; cursor: pointer; }

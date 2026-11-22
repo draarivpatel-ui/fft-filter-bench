@@ -1,6 +1,6 @@
 # FFT Filter Bench
 
-**Design a filter. See its spectrum, poles and delay at the same time.** A local DSP workbench with a radix-2 FFT, windowed-sinc FIR design, biquad IIR design, live Canvas plots, keyboard probes and seven local export formats.
+**Design a filter. See its spectrum, poles and delay at the same time.** A local DSP workbench with a radix-2 FFT, windowed-sinc FIR design, biquad IIR design, live Canvas plots, interactive z-plane diagrams, a spec-mask verifier, WebAudio A/B audition and eleven local export formats.
 
 Open `index.html` directly from disk. There are no dependencies, build steps, accounts or network requests. `src/dsp.cjs` is generated from `src/dsp.mjs` by `npm run build`, so the browser and the Node tests share one algorithm source.
 
@@ -34,15 +34,22 @@ Butterworth lowpass and highpass use RBJ-style sections with `Q = 1/sqrt(2)`, pl
 
 FIR filters are odd-tap windowed-sinc designs with rectangular, Hann, Hamming or Blackman windows, normalized to unity DC gain. Stability is checked with the second-order Jury criterion plus explicit pole radii. At a transmission zero the analytic group delay is 0/0, so the engine resolves the finite limit from a nearby frequency instead of emitting NaN.
 
+`polyRoots` finds every root of the FIR polynomial through companion-matrix eigenvalues (Francis double-shift QR with balancing), Laguerre polishing on the original polynomial, and per-root backward-error certification `|P(z)| / sum|a_j||z|^j`. Roots that fail certification are snapped to authoritative structured candidates (unit-circle angles scanned from the symmetric amplitude response, real-axis roots scanned directly) and re-certified, so high-order symmetric designs converge where plain deflation diverges. Windows with exactly-zero edge taps report those missing roots honestly as `droppedRoots` (roots at infinity) instead of fabricating origin zeros.
+
 ## Workbench features
 
-- Live Canvas plots: source and filtered waveforms, windowed FFT magnitude spectra, selectable Bode magnitude / phase / group delay, and the FIR impulse response.
-- Live SVG pole-zero plane with the unit circle, plus a computed coefficients table.
+- Live Canvas plots: source and filtered waveforms, windowed FFT magnitude spectra, selectable Bode magnitude / phase / unwrapped phase / group delay for the biquad, and magnitude / unwrapped phase / group delay for the FIR.
+- Two interactive SVG z-plane plots: the biquad pole-zero plane and a dedicated FIR zero plane with the origin pole. Both draw the unit circle and a radius-fitted grid, and every marker is clickable and keyboard-focusable, reporting the exact complex coordinate, radius and multiplicity on activation.
+- Live BIBO stability verdicts: `max |p_i| < 1` for the IIR and the FIR zero set with solver diagnostics (convergence flag and maximum backward residual).
+- Spec-mask compliance verifier: enter passband/stopband edges, a ripple ceiling, attenuation floor and linear-phase symmetry tolerance; the mask is drawn over the measured response and a live PASS/FAIL badge reports the combined verdict for every applicable filter, with the per-filter ripple, attenuation, transition width and symmetry numbers printed below.
+- Pure WebAudio audition: synthesizes the current benchmark stimulus locally and plays it dry, through the biquad or through the FIR. Stop and mute controls are always reachable, samples are hard-clamped to [-1, 1] and gain is clamped to 0.8. No audio files, media elements or network streams.
+- In-page self-test battery: FFT/IFFT round-trip error below 1e-10, Parseval's theorem, Butterworth cutoff gain, FIR unity DC gain and constant group delay, BIBO pole stability across all families, polynomial root solving, the SHA-256 known vector and spec-mask pass/fail cases, with per-test PASS lines and a summary.
+- URL-hash bookmarking: `Bookmark` serializes the full design state into a versioned `#v=2...` hash, copies the URL to the clipboard and restores it exactly on load.
 - Real-time diagnostics: stability, maximum pole radius, gain at cutoff, DC group delay, input and output RMS, Parseval relative error and finite-sample status.
-- Four synthetic presets, plus sliders for sample rate, FFT size, tone frequencies, noise, seed, filter family, cutoff, ripple, Q, FIR taps and window.
+- Four synthetic presets, plus controls for sample rate, FFT size, tone frequencies, noise, seed, filter family, cutoff, ripple, Q, FIR taps and window.
 - Pointer and keyboard probes. Arrow keys move, Shift moves ten, Home and End jump to the endpoints, Enter pins the probe and Escape releases it.
 - Light and dark themes, an in-page guide and a responsive layout.
-- Seven exports: JSON snapshot (schema v2), coefficient CSV, Bode CSV, spectrum CSV, C header, input WAV and filtered WAV. All are generated locally.
+- Eleven exports: JSON snapshot (schema v2), coefficient CSV, Bode CSV, spectrum CSV, biquad C header, embedded `filter_coeffs.h` (floating-point `b[]`/`a[]` and signed Q2.30 fixed-point arrays plus `#define` taps), a runnable Python/SciPy `filter_design.py`, SHA-256-fingerprinted `design_report.json` and `design_report.csv`, and input/filtered WAVs. All are generated locally.
 
 ## Verification
 
@@ -55,14 +62,16 @@ npm test
 Equivalent exact command:
 
 ```sh
-node --test --test-reporter=spec test/dsp.test.mjs test/invariants.test.mjs ui.test.cjs
+node --test --test-reporter=spec test/dsp.test.mjs test/invariants.test.mjs test/extended.test.mjs test/analysis.test.mjs ui.test.cjs ui2.test.cjs
 ```
 
-**109 tests passed, 0 failed, 0 skipped:** 37 original engine checks, 56 deepened invariant / edge-case checks and 16 DOM / controller checks.
+**332 tests passed, 0 failed, 0 skipped:** 37 original engine checks, 56 deepened invariant checks, 63 extended edge-case checks, 99 analysis checks (phase unwrapping, FIR group delay and zero solving, spec-mask verdicts, hashing and exporters), 23 original DOM checks and 54 new-surface DOM checks.
 
-Coverage includes Parseval energy at five transform sizes, IFFT round trips up to N=2048, FFT linearity and circular-shift phase, conjugate symmetry, window symmetry, FIR unity DC gain and linear phase, Butterworth -3.0103 dB at cutoff, Chebyshev ripple depth across five ripple values, highpass and bandpass endpoint gains, Jury stability across all four families and seven cutoffs, pole-zero polynomial residuals, analytic group delay versus central finite differences, matched-cutoff rolloff, exporter round trips, WAV header validity and SVG finiteness.
+Coverage includes Parseval energy at five transform sizes, IFFT round trips up to N=2048, FFT linearity and circular-shift phase, conjugate symmetry, window symmetry, FIR unity DC gain and linear phase, Butterworth -3.0103 dB at cutoff, Chebyshev ripple depth across five ripple values, highpass and bandpass endpoint gains, Jury stability across all four families and seven cutoffs, pole-zero polynomial residuals, analytic group delay versus central finite differences, matched-cutoff rolloff, exporter round trips, WAV header validity and SVG finiteness. The analysis suite adds companion-QR root solving across tap counts and windows (including dropped-root accounting), backward-error certification, unwrapped-phase continuity, spec-mask pass/fail boundaries, SHA-256 fingerprints, hash round trips, the Q2.30 header and the self-test battery itself.
 
-The deterministic DOM adapter executes the real `index.html` scripts. It checks startup, all four presets, control handlers, Bode segment buttons, keyboard probes and pinning, DPI-aware canvas resize, theme and guide toggles, storage failure, invalid seed clamping, error-state export blocking, all seven downloads and the absence of remote script sources. It records zero console errors. It does not measure browser layout or claim a rendered screenshot.
+The deterministic DOM adapter executes the real `index.html` scripts. It checks startup, all four presets, control handlers, Bode and FIR view segment buttons, z-plane marker activation, the spec badge and readout, keyboard probes and pinning, DPI-aware canvas resize, theme and guide toggles, storage failure, invalid seed clamping, error-state export blocking, all eleven downloads, URL-hash bookmarking and restoration, the self-test panel and the absence of remote script sources. It records zero console errors. It does not measure browser layout or claim a rendered screenshot.
+
+`npm run audit` (`scripts/browser-audit.mjs`) runs the app in real headless Chromium at 1440x900 and 390x844 with real pointer and keyboard input: 52 checks covering every response view, marker clicks and keyboard activation, the spec badge flip, all eleven downloads, the fingerprinted report, hash restore in a fresh page, the self-test battery, the audition controls and layout overflow. It resolves a local or global Playwright install (the repository itself stays dependency-free). Latest run: **52/52 passed**, with zero console errors, zero uncaught page errors, zero external network requests and zero horizontal overflow at both sizes.
 
 Optional timing check: `npm run bench`. On Node v26.8.1 in this environment, a 65,536-point FFT took 5.42 ms, a 65,536-sample biquad pass 0.40 ms, a 4,096-point Bode sweep 1.00 ms, and the Parseval relative error was 8.305e-13. These are local timing numbers, not hardware benchmarks.
 
@@ -80,24 +89,27 @@ const wav = D.exportWAV(output, 48000);
 console.log(stability.stable, bode.mag[0], wav.length);
 ```
 
-For CommonJS, `require('./src/dsp.cjs')` exposes the same 53 functions.
+For CommonJS, `require('./src/dsp.cjs')` exposes the same 62 functions. The analysis additions include `firBode`, `firPoleZero`, `firStability`, `firSymmetryError`, `polyRoots`, `specMaskCheck`, `sha256Hex`, `exportEmbeddedHeader`, `exportPythonSnippet`, `exportDesignReport`, `exportDesignReportCSV`, `serializeConfigHash`, `parseConfigHash` and `runSelfTests`.
 
 ## Source map
 
 | File | Responsibility |
 | --- | --- |
-| `src/dsp.mjs` | Canonical FFT, FIR, biquad, response, stability, diagnostics and export algorithms |
+| `src/dsp.mjs` | Canonical FFT, FIR, biquad, response, root solving, spec-mask, hashing and export algorithms |
 | `src/dsp.cjs` | Generated UMD browser bundle, also usable from CommonJS |
 | `scripts/build-bundle.mjs` | Regenerates the browser bundle from the canonical module |
 | `scripts/bench.mjs` | Optional local timing check |
-| `app.js` | Controller: state, Canvas/SVG drawing, probes, exports and bindings |
+| `scripts/browser-audit.mjs` | Headless Chromium audit at desktop and mobile sizes |
+| `app.js` | Controller: state, Canvas/SVG drawing, z-plane interaction, spec verifier, WebAudio audition, probes, exports and bindings |
 | `index.html`, `style.css` | Responsive accessible workbench and themes |
 | `test/dsp.test.mjs` | Original 37 engine checks |
 | `test/invariants.test.mjs` | Deepened math, physics, invariant and edge-case checks |
-| `ui.test.cjs`, `dom-harness.cjs` | Real controller tests with a deterministic DOM/canvas adapter |
+| `test/extended.test.mjs` | Extended boundary and robustness checks |
+| `test/analysis.test.mjs` | Root solver, FIR response, spec mask, hashing, exporters and self-tests |
+| `ui.test.cjs`, `ui2.test.cjs`, `dom-harness.cjs` | Real controller tests with a deterministic DOM/canvas adapter |
 
 ## Scope and next steps
 
-This is an idealized, double-precision, offline DSP engine. It uses synthetic stimuli and analytic biquad designs; it does not model fixed-point quantization, coefficient sensitivity, finite word length, real ADC noise or loudspeaker/room behavior. A 16-bit WAV export demonstrates clipping but is not a perceptual audio test. Higher-order cascaded designs, least-squares or equiripple FIR design, FFT convolution overlap-add and comparison against a reference filter-design library are the natural next engineering steps.
+This is an idealized, double-precision, offline DSP engine. It uses synthetic stimuli and analytic biquad designs; it does not model coefficient sensitivity, finite word length effects inside the filters, real ADC noise or loudspeaker/room behavior. The Q2.30 export quantizes coefficients but does not simulate the quantized response, a 16-bit WAV export demonstrates clipping but is not a perceptual audio test, and the WebAudio audition resynthesizes the stimulus at the host output rate rather than the configured sample rate. Higher-order cascaded designs, least-squares or equiripple FIR design, FFT convolution overlap-add and comparison against a reference filter-design library are the natural next engineering steps.
 
 Submission copy is in [DEVPOST_UPGRADE.md](DEVPOST_UPGRADE.md).

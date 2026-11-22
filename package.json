@@ -7,8 +7,9 @@
   "main": "src/dsp.mjs",
   "scripts": {
     "build": "node scripts/build-bundle.mjs",
-    "test": "node --test --test-reporter=spec test/dsp.test.mjs test/invariants.test.mjs test/extended.test.mjs ui.test.cjs",
-    "bench": "node scripts/bench.mjs"
+    "test": "node --test --test-reporter=spec test/dsp.test.mjs test/invariants.test.mjs test/extended.test.mjs test/analysis.test.mjs ui.test.cjs ui2.test.cjs",
+    "bench": "node scripts/bench.mjs",
+    "audit": "node scripts/browser-audit.mjs"
   },
   "keywords": ["fft", "dsp", "filter", "biquad", "fir", "bode", "pole-zero", "signal-processing"],
   "license": "MIT",
